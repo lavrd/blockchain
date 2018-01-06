@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"golang.org/x/net/websocket"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 const (
@@ -190,7 +191,7 @@ func initNode() {
 	}
 
 	// dial to init node
-	ws, err := websocket.Dial("ws://"+*iNode+"/p2p", "", origin)
+	ws, err := websocket.Dial("ws://" + *iNode+"/p2p", "", origin)
 	if err != nil {
 		panic(err)
 	}
@@ -540,7 +541,7 @@ func main() {
 		http.HandleFunc("/nodes", nodesHandler)
 
 		info("Start http server on port", *hPort)
-		panic(http.ListenAndServe(":"+*hPort, nil))
+		panic(http.ListenAndServe(":" + *hPort, nil))
 	}()
 
 	// start websocket server
@@ -548,7 +549,7 @@ func main() {
 		http.Handle("/p2p", websocket.Handler(p2pHandler))
 
 		info("Start websocket server on port", *wsPort)
-		panic(http.ListenAndServe(":"+*wsPort, nil))
+		panic(http.ListenAndServe(":" + *wsPort, nil))
 	}()
 
 	// notify nodes
