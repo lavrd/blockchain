@@ -5,7 +5,7 @@
   branch = "master"
   name = "golang.org/x/net"
   packages = ["websocket"]
-  revision = "42fe2e1c20de1054d3d30f82cc9fb5b41e2e3767"
+  revision = "5f9ae10d9af5b1c89ae6904293b14b064d4ada23"
 
 [solve-meta]
   analyzer-name = "dep"

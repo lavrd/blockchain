@@ -17,8 +17,8 @@ const (
 	// constants are used to understand
 	// what data came from the node
 
-	// VMBLOCKS means that received valid / mining block
-	VMBLOCKS = iota
+	// VMBlock means that received valid / mining block
+	VMBlock = iota
 	// FACT means that received new fact
 	FACT
 )
@@ -26,9 +26,9 @@ const (
 // Nodes type for store current connections
 type Nodes struct {
 	// store to send data to the nodes
-	Conns []*websocket.Conn `json:"conns"`
+	Connections []*websocket.Conn `json:"connections"`
 	// store to send the current node list to a new node
-	Addrs []string `json:"addrs"`
+	IPs []string `json:"i_ps"`
 }
 
 // Fact type for store fact
@@ -124,6 +124,7 @@ func initRootNode() {
 	blockchain = []*Block{{
 		Timestamp: time.Now(),
 	}}
+
 	// calc hash for genesis block
 	blockchain[0].Hash = calcHash(blockchain[0].String())
 
@@ -154,8 +155,10 @@ func initNode() {
 	if err != nil {
 		panic(err)
 	}
+
 	// set current nodes addr
-	nodes.Addrs = t.Nodes
+	nodes.IPs = t.Nodes
+
 	info("Current nodes addrs", t.Nodes)
 
 	// get current blockchain and mining block
@@ -169,15 +172,17 @@ func initNode() {
 	if err != nil {
 		panic(err)
 	}
+
 	// set current mining block
 	miningBlock = t.VMBlocks.MiningBlock
 	// set current blockchain
 	blockchain = t.Blockchain
+
 	info("Current blockchain", t.Blockchain,
 		"current mining block", t.VMBlocks.MiningBlock)
 
 	// connect to each nodes
-	for _, addr := range nodes.Addrs {
+	for _, addr := range nodes.IPs {
 		// dial to node
 		ws, err := websocket.Dial(addr, "", origin)
 		if err != nil {
@@ -186,8 +191,9 @@ func initNode() {
 
 		// start receiving node
 		go receive(ws)
+
 		// added to connections
-		nodes.Conns = append(nodes.Conns, ws)
+		nodes.Connections = append(nodes.Connections, ws)
 	}
 
 	// dial to init node
@@ -198,9 +204,10 @@ func initNode() {
 
 	// start receiving init node
 	go receive(ws)
+
 	// added to connections and addrs
-	nodes.Addrs = append(nodes.Addrs, ws.RemoteAddr().String())
-	nodes.Conns = append(nodes.Conns, ws)
+	nodes.IPs = append(nodes.IPs, ws.RemoteAddr().String())
+	nodes.Connections = append(nodes.Connections, ws)
 }
 
 // returns latest blockchain block
@@ -224,6 +231,7 @@ func createMiningBlock() *Block {
 			Facts:     unconfirmedFacts,
 		}
 	)
+
 	// flush unconfirmed facts
 	// now he in new mining block
 	unconfirmedFacts = nil
@@ -240,12 +248,14 @@ func createMiningBlock() *Block {
 	blk.Hash = calcHash(blk.String())
 
 	info("Create new mining block", blk)
+
 	return blk
 }
 
 // String returns block data in string
 func (b *Block) String() string {
 	facts := ""
+
 	for _, fact := range b.Facts {
 		facts += fact.Id
 		facts += fmt.Sprint(*fact.Fact)
@@ -263,6 +273,7 @@ func calcHash(data string) string {
 // receive data from node
 func receive(ws *websocket.Conn) {
 	info("Start receive data from", ws.RemoteAddr(), "node")
+
 	for {
 		t := &API{}
 
@@ -275,7 +286,7 @@ func receive(ws *websocket.Conn) {
 
 		// switch data type
 		switch t.Type {
-		case VMBLOCKS:
+		case VMBlock:
 			// if block
 			info("From", ws.RemoteAddr(), "node received VMBLOCKS", t.VMBlocks)
 
@@ -316,12 +327,12 @@ func nodeRemove(ws *websocket.Conn) {
 	info(ws.RemoteAddr(), "node disconnect")
 
 	// search node id
-	for i, addr := range nodes.Addrs {
+	for i, addr := range nodes.IPs {
 		// if found
 		if ws.RemoteAddr().String() == addr {
 			// remove from store
-			nodes.Addrs = append(nodes.Addrs[:i], nodes.Addrs[i+1:]...)
-			nodes.Conns = append(nodes.Conns[:i], nodes.Conns[i+1:]...)
+			nodes.IPs = append(nodes.IPs[:i], nodes.IPs[i+1:]...)
+			nodes.Connections = append(nodes.Connections[:i], nodes.Connections[i+1:]...)
 		}
 	}
 }
@@ -338,9 +349,12 @@ func isValidBlock(unconfirmedBlk *Block) bool {
 		calcHash(unconfirmedBlk.String()) != unconfirmedBlk.Hash {
 
 		info("Block", unconfirmedBlk, "failed validation")
+
 		return false
 	}
+
 	info("Block", unconfirmedBlk, "passed validation")
+
 	return true
 }
 
@@ -354,6 +368,7 @@ func info(info ...interface{}) {
 // notify the nodes of a successful mining or new fact
 func notify() {
 	info("Start notify nodes")
+
 	for {
 		select {
 		case t, ok := <-miningSuccessNotice:
@@ -363,10 +378,11 @@ func notify() {
 
 				// update mining block
 				miningBlock = t.MiningBlock
+
 				// notify nodes
-				for _, node := range nodes.Conns {
+				for _, node := range nodes.Connections {
 					err := websocket.JSON.Send(node, &API{
-						Type: VMBLOCKS,
+						Type: VMBlock,
 						VMBlocks: &VMBlocks{
 							ValidBlock:  t.ValidBlock,
 							MiningBlock: t.MiningBlock,
@@ -384,7 +400,7 @@ func notify() {
 				info("New fact notice", fact.Id, *fact.Fact)
 
 				// notify nodes
-				for _, node := range nodes.Conns {
+				for _, node := range nodes.Connections {
 					err := websocket.JSON.Send(node, API{
 						Type: FACT, Fact: fact,
 					})
@@ -401,8 +417,8 @@ func notify() {
 // handle new node
 func p2pHandler(ws *websocket.Conn) {
 	// add node to connections
-	nodes.Addrs = append(nodes.Addrs, ws.RemoteAddr().String())
-	nodes.Conns = append(nodes.Conns, ws)
+	nodes.IPs = append(nodes.IPs, ws.RemoteAddr().String())
+	nodes.Connections = append(nodes.Connections, ws)
 
 	// start receiving data from node
 	receive(ws)
@@ -432,6 +448,7 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 	info(r.RemoteAddr, "/fact", r.Method)
 
 	w.Header().Set("Content-Type", "application/json")
+
 	switch r.Method {
 	case http.MethodGet:
 
@@ -458,7 +475,10 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 
 		break
 	case http.MethodPost:
-		var fact interface{}
+		var (
+			fact interface{}
+		)
+
 		err := json.NewDecoder(r.Body).Decode(&fact)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -492,7 +512,7 @@ func nodesHandler(w http.ResponseWriter, r *http.Request) {
 	info(r.RemoteAddr, "/nodes")
 
 	w.Header().Set("Content-Type", "application/json")
-	err := json.NewEncoder(w).Encode(API{Nodes: nodes.Addrs})
+	err := json.NewEncoder(w).Encode(API{Nodes: nodes.IPs})
 	if err != nil {
 		panic(err)
 	}
