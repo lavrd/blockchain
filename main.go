@@ -34,7 +34,7 @@ type Nodes struct {
 // Fact type for store fact
 type Fact struct {
 	// has unique id for identify
-	Id   string       `json:"id"`
+	ID   string       `json:"id"`
 	Fact *interface{} `json:"fact,omitempty"`
 }
 
@@ -197,7 +197,7 @@ func initNode() {
 	}
 
 	// dial to init node
-	ws, err := websocket.Dial("ws://" + *iNode+"/p2p", "", origin)
+	ws, err := websocket.Dial("ws://"+*iNode+"/p2p", "", origin)
 	if err != nil {
 		panic(err)
 	}
@@ -257,7 +257,7 @@ func (b *Block) String() string {
 	facts := ""
 
 	for _, fact := range b.Facts {
-		facts += fact.Id
+		facts += fact.ID
 		facts += fmt.Sprint(*fact.Fact)
 	}
 
@@ -304,7 +304,7 @@ func receive(ws *websocket.Conn) {
 			// check on the repetition of facts
 			for _, tFact := range t.VMBlocks.ValidBlock.Facts {
 				for i, lFact := range unconfirmedFacts {
-					if tFact.Id == lFact.Id {
+					if tFact.ID == lFact.ID {
 						// if found -> remove fact
 						unconfirmedFacts = append(unconfirmedFacts[:i], unconfirmedFacts[i+1:]...)
 					}
@@ -314,7 +314,7 @@ func receive(ws *websocket.Conn) {
 			break
 		case FACT:
 			// if fact
-			info("From", ws.RemoteAddr(), "node received new fact", t.Fact.Id, *t.Fact.Fact)
+			info("From", ws.RemoteAddr(), "node received new fact", t.Fact.ID, *t.Fact.Fact)
 
 			// append to unconfirmed facts
 			unconfirmedFacts = append(unconfirmedFacts, t.Fact)
@@ -361,7 +361,7 @@ func isValidBlock(unconfirmedBlk *Block) bool {
 // print info log in verbose mode
 func info(info ...interface{}) {
 	if *v {
-		log.Println(info)
+		log.Println(info...)
 	}
 }
 
@@ -397,7 +397,7 @@ func notify() {
 		case fact, ok := <-newFactNotice:
 			// if new fact
 			if ok {
-				info("New fact notice", fact.Id, *fact.Fact)
+				info("New fact notice", fact.ID, *fact.Fact)
 
 				// notify nodes
 				for _, node := range nodes.Connections {
@@ -491,7 +491,7 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		t := &Fact{Id: calcHash(time.Now().String()), Fact: &fact}
+		t := &Fact{ID: calcHash(time.Now().String()), Fact: &fact}
 		// notify nodes of a new fact
 		newFactNotice <- t
 		// append to other unconfirmed facts
@@ -561,7 +561,7 @@ func main() {
 		http.HandleFunc("/nodes", nodesHandler)
 
 		info("Start http server on port", *hPort)
-		panic(http.ListenAndServe(":" + *hPort, nil))
+		panic(http.ListenAndServe(":"+*hPort, nil))
 	}()
 
 	// start websocket server
@@ -569,7 +569,7 @@ func main() {
 		http.Handle("/p2p", websocket.Handler(p2pHandler))
 
 		info("Start websocket server on port", *wsPort)
-		panic(http.ListenAndServe(":" + *wsPort, nil))
+		panic(http.ListenAndServe(":"+*wsPort, nil))
 	}()
 
 	// notify nodes
