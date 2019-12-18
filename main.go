@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
@@ -100,6 +102,11 @@ var (
 	miningSuccessNotice = make(chan *VMBlocks)
 	// channel announcing nodes about new fact
 	newFactNotice = make(chan *Fact)
+	// channel announcing to start mining
+	startMiningNotice = make(chan struct{})
+
+	// indicate is node in mining state now
+	isInMining = false
 )
 
 func init() {
@@ -345,8 +352,7 @@ func isValidBlock(unconfirmedBlk *Block) bool {
 	unconfirmedBlk.Nonce = ""
 
 	if latestBlk.Index+1 != unconfirmedBlk.Index ||
-		latestBlk.Hash != unconfirmedBlk.PrevHash ||
-		calcHash(unconfirmedBlk.String()) != unconfirmedBlk.Hash {
+		latestBlk.Hash != unconfirmedBlk.PrevHash {
 
 		info("Block", unconfirmedBlk, "failed validation")
 
@@ -479,7 +485,7 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 			fact interface{}
 		)
 
-		err := json.NewDecoder(r.Body).Decode(&fact)
+		buf, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(API{
@@ -490,6 +496,8 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+
+		fact = string(buf)
 
 		t := &Fact{ID: calcHash(time.Now().String()), Fact: &fact}
 		// notify nodes of a new fact
@@ -503,8 +511,7 @@ func factHandler(w http.ResponseWriter, r *http.Request) {
 func mineHandler(_ http.ResponseWriter, r *http.Request) {
 	info(r.RemoteAddr, "/mine")
 
-	// try mining
-	go tryMining(r.URL.Query().Get("nonce"))
+	startMiningNotice <- struct{}{}
 }
 
 // handler that send nodes addresses
@@ -552,6 +559,16 @@ func tryMining(nonce string) {
 	}
 }
 
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+func randString() string {
+	b := make([]byte, 256)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+	return string(b)
+}
+
 func main() {
 	// start http server
 	go func() {
@@ -570,6 +587,32 @@ func main() {
 
 		info("Start websocket server on port", *wsPort)
 		panic(http.ListenAndServe(":"+*wsPort, nil))
+	}()
+
+	go func() {
+		stop := make(chan struct{})
+		for {
+			select {
+			case <-startMiningNotice:
+				if isInMining {
+					stop <- struct{}{}
+					continue
+				}
+
+				go func() {
+					isInMining = true
+					for range time.NewTicker(time.Millisecond * 500).C {
+						select {
+						case <-stop:
+							isInMining = false
+							return
+						default:
+							tryMining(randString())
+						}
+					}
+				}()
+			}
+		}
 	}()
 
 	// notify nodes
