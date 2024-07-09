@@ -98,12 +98,18 @@ fn tcp_server() void {
 
 fn mining_loop(rnd: *std.rand.Xoshiro256) !void {
     log.info("starting mining loop", .{});
-    const allocator = std.heap.page_allocator;
-    const nonce = try allocator.alloc(u8, nonce_length);
-    defer allocator.free(nonce);
+    var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     while (should_wait()) {
-        fill_buf(rnd, nonce);
-        log.debug("new nonce generated {any}", .{nonce});
+        std.time.sleep(1_000_000_000); // 1s
+        fill_buf_random(rnd, &nonce);
+        _ = Block{
+            .index = 0,
+            .hash = [_]u8{0} ** block_hash_length,
+            .prev_hash = [_]u8{0} ** block_hash_length,
+            .timestamp = 0,
+            .complexity = 0,
+            .nonce = nonce,
+        };
     }
     log.info("mining loop stopped", .{});
 }
@@ -118,11 +124,13 @@ fn should_wait() bool {
     const wait_signal_state = wait_signal.load(std.builtin.AtomicOrder.monotonic);
     if (wait_signal_state) {
         // To not overload cpu.
-        std.time.sleep(1_000_000_000); // 1s
+        std.time.sleep(5_000_000); // 5ms
     }
     return wait_signal_state;
 }
 
-fn fill_buf(rand: *std.rand.Xoshiro256, buf: []u8) void {
-    rand.random().bytes(buf);
+fn fill_buf_random(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
+    for (0..nonce_length) |i| {
+        nonce[i] = rnd.random().int(u8);
+    }
 }
