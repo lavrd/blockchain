@@ -1,15 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const logger = @import("logger.zig");
-
 // Init scoped logger.
 const log = std.log.scoped(.main);
 
 // Init our custom logger handler.
 pub const std_options = .{
     .log_level = .debug,
-    .logFn = logger.logFn,
+    .logFn = logFn,
 };
 
 const block_hash_length = std.crypto.hash.sha2.Sha256.digest_length;
@@ -151,4 +149,20 @@ fn fill_buf_random(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
     for (0..nonce_length) |i| {
         nonce[i] = rnd.random().int(u8);
     }
+}
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    // Print the message to stderr, silently ignoring any errors.
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    const stderr = std.io.getStdErr().writer();
+    nosuspend stderr.print(
+        "{d} " ++ "[" ++ comptime level.asText() ++ "] " ++ "(" ++ @tagName(scope) ++ ") " ++ format ++ "\n",
+        .{std.time.milliTimestamp()} ++ args,
+    ) catch return;
 }
