@@ -52,11 +52,23 @@ pub fn main() !void {
         },
     }
 
+    const allocator = std.heap.page_allocator;
+
     var rnd = std.rand.DefaultPrng.init(0);
+    var state = State{ .blocks = std.ArrayList(Block).init(allocator) };
+    // Init genesis block.
+    try state.blocks.append(Block{
+        .index = 0,
+        .hash = [_]u8{0} ** block_hash_length,
+        .prev_hash = [_]u8{0} ** block_hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 0,
+        .nonce = [_]u8{0} ** nonce_length,
+    });
 
     const http_server_thread = try std.Thread.spawn(.{}, http_server, .{});
     const tcp_server_thread = try std.Thread.spawn(.{}, tcp_server, .{});
-    const mining_loop_thread = try std.Thread.spawn(.{}, mining_loop, .{@as(*std.rand.Xoshiro256, &rnd)});
+    const mining_loop_thread = try std.Thread.spawn(.{}, mining_loop, .{ @as(*std.rand.Xoshiro256, &rnd), @as(*State, &state) });
     const broadcast_loop_thread = try std.Thread.spawn(.{}, broadcast_loop, .{});
 
     var act = std.posix.Sigaction{
@@ -74,6 +86,12 @@ pub fn main() !void {
     tcp_server_thread.join();
     mining_loop_thread.join();
     broadcast_loop_thread.join();
+
+    log.debug("current blocks length is {d} and last index is {d}", .{
+        state.blocks.items.len,
+        state.blocks.getLast().index,
+    });
+    std.debug.assert(state.blocks.items.len - 1 == state.blocks.getLast().index);
 
     log.info("final successfully exiting...", .{});
 }
@@ -96,20 +114,20 @@ fn tcp_server() void {
     log.info("tcp server stopped", .{});
 }
 
-fn mining_loop(rnd: *std.rand.Xoshiro256) !void {
+fn mining_loop(rnd: *std.rand.Xoshiro256, state: *State) !void {
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     while (should_wait()) {
         std.time.sleep(1_000_000_000); // 1s
         fill_buf_random(rnd, &nonce);
-        _ = Block{
-            .index = 0,
+        try state.blocks.append(Block{
+            .index = state.blocks.getLast().index + 1,
             .hash = [_]u8{0} ** block_hash_length,
             .prev_hash = [_]u8{0} ** block_hash_length,
-            .timestamp = 0,
+            .timestamp = std.time.milliTimestamp(),
             .complexity = 0,
             .nonce = nonce,
-        };
+        });
     }
     log.info("mining loop stopped", .{});
 }
