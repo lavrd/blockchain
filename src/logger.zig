@@ -6,6 +6,7 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    // Print the message to stderr, silently ignoring any errors.
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
     const stderr = std.io.getStdErr().writer();
