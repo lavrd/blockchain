@@ -39,6 +39,45 @@ const Block = struct {
     timestamp: i64,
     complexity: u8,
     nonce: [nonce_length]u8,
+
+    fn fields_size() comptime_int {
+        return comptime @sizeOf(u128) +
+            block_hash_length +
+            block_hash_length +
+            @sizeOf(i64) +
+            @sizeOf(u8) +
+            nonce_length;
+    }
+
+    fn encode(self: Block) [fields_size()]u8 {
+        var buf = [_]u8{0} ** fields_size();
+
+        const self_index_fr = 0;
+        const self_index_to = self_index_fr + @sizeOf(u128);
+        std.mem.writeInt(u128, buf[self_index_fr..self_index_to], self.index, .little);
+
+        const self_hash_fr = self_index_to;
+        const self_hash_to = self_hash_fr + block_hash_length;
+        @memcpy(buf[self_hash_fr..self_hash_to], &self.hash);
+
+        const self_prev_hash_fr = self_hash_to;
+        const self_prev_hash_to = self_prev_hash_fr + block_hash_length;
+        @memcpy(buf[self_prev_hash_fr..self_prev_hash_to], &self.prev_hash);
+
+        const self_timestamp_fr = self_prev_hash_to;
+        const self_timestamp_to = self_timestamp_fr + @sizeOf(i64);
+        std.mem.writeInt(i64, buf[self_timestamp_fr..self_timestamp_to], self.timestamp, .little);
+
+        const self_complexity_fr = self_timestamp_to;
+        const self_complexity_to = self_complexity_fr + @sizeOf(u8);
+        std.mem.writeInt(u8, buf[self_complexity_fr..self_complexity_to], self.complexity, .little);
+
+        const self_nonce_fr = self_complexity_to;
+        const self_nonce_to = self_nonce_fr + nonce_length;
+        @memcpy(buf[self_nonce_fr..self_nonce_to], &self.nonce);
+
+        return buf;
+    }
 };
 
 pub fn main() !void {
@@ -53,9 +92,11 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var rnd = std.rand.DefaultPrng.init(0);
-    var state = State{ .blocks = std.ArrayList(Block).init(allocator) };
+
+    var blocks = std.ArrayList(Block).init(allocator);
+    defer blocks.deinit();
     // Init genesis block.
-    try state.blocks.append(Block{
+    try blocks.append(Block{
         .index = 0,
         .hash = [_]u8{0} ** block_hash_length,
         .prev_hash = [_]u8{0} ** block_hash_length,
@@ -64,9 +105,14 @@ pub fn main() !void {
         .nonce = [_]u8{0} ** nonce_length,
     });
 
+    var state = State{ .blocks = blocks };
+
     const http_server_thread = try std.Thread.spawn(.{}, http_server, .{});
     const tcp_server_thread = try std.Thread.spawn(.{}, tcp_server, .{});
-    const mining_loop_thread = try std.Thread.spawn(.{}, mining_loop, .{ @as(*std.rand.Xoshiro256, &rnd), @as(*State, &state) });
+    const mining_loop_thread = try std.Thread.spawn(.{}, mining_loop, .{
+        @as(*std.rand.Xoshiro256, &rnd),
+        @as(*State, &state),
+    });
     const broadcast_loop_thread = try std.Thread.spawn(.{}, broadcast_loop, .{});
 
     var act = std.posix.Sigaction{
@@ -165,4 +211,23 @@ fn logFn(
         "{d} " ++ "[" ++ comptime level.asText() ++ "] " ++ "(" ++ @tagName(scope) ++ ") " ++ format ++ "\n",
         .{std.time.milliTimestamp()} ++ args,
     ) catch return;
+}
+
+test "test_block_encoding" {
+    const index = 102_000_882_000_511;
+    const block = Block{
+        .index = index,
+        .hash = [_]u8{1} ** block_hash_length,
+        .prev_hash = [_]u8{2} ** block_hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 243,
+        .nonce = [_]u8{3} ** nonce_length,
+    };
+    const encoded = block.encode();
+    try std.testing.expect(std.mem.eql(
+        u8,
+        encoded[0..16],
+        &[16]u8{ 127, 162, 86, 238, 196, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    ));
+    try std.testing.expect(std.mem.readInt(u128, encoded[0..16], .little) == index);
 }
