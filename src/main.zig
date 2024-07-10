@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Sha256 = std.crypto.hash.sha2.Sha256;
 // Init scoped logger.
 const log = std.log.scoped(.main);
 
@@ -10,7 +11,7 @@ pub const std_options = .{
     .logFn = logFn,
 };
 
-const block_hash_length = std.crypto.hash.sha2.Sha256.digest_length;
+const hash_length = Sha256.digest_length;
 const nonce_length: usize = 256;
 
 // We use it to wait in threads loops until os signal will be received.
@@ -34,22 +35,22 @@ const State = struct {
 
 const Block = struct {
     index: u128,
-    hash: [block_hash_length]u8,
-    prev_hash: [block_hash_length]u8,
+    hash: [hash_length]u8,
+    prev_hash: [hash_length]u8,
     timestamp: i64,
     complexity: u8,
     nonce: [nonce_length]u8,
 
     fn fields_size() comptime_int {
         return comptime @sizeOf(u128) +
-            block_hash_length +
-            block_hash_length +
+            hash_length +
+            hash_length +
             @sizeOf(i64) +
             @sizeOf(u8) +
             nonce_length;
     }
 
-    fn encode(self: Block) [fields_size()]u8 {
+    fn to_bytes(self: Block) [fields_size()]u8 {
         var buf = [_]u8{0} ** fields_size();
 
         const self_index_fr = 0;
@@ -57,11 +58,11 @@ const Block = struct {
         std.mem.writeInt(u128, buf[self_index_fr..self_index_to], self.index, .little);
 
         const self_hash_fr = self_index_to;
-        const self_hash_to = self_hash_fr + block_hash_length;
+        const self_hash_to = self_hash_fr + hash_length;
         @memcpy(buf[self_hash_fr..self_hash_to], &self.hash);
 
         const self_prev_hash_fr = self_hash_to;
-        const self_prev_hash_to = self_prev_hash_fr + block_hash_length;
+        const self_prev_hash_to = self_prev_hash_fr + hash_length;
         @memcpy(buf[self_prev_hash_fr..self_prev_hash_to], &self.prev_hash);
 
         const self_timestamp_fr = self_prev_hash_to;
@@ -77,6 +78,19 @@ const Block = struct {
         @memcpy(buf[self_nonce_fr..self_nonce_to], &self.nonce);
 
         return buf;
+    }
+
+    fn to_hash(self: *Block) [Sha256.digest_length]u8 {
+        var hasher = Sha256.init(.{});
+        const block_bytes = self.to_bytes();
+        hasher.update(&block_bytes);
+        const hash = hasher.finalResult();
+        self.hash = hash;
+        return hash;
+    }
+
+    fn is_hash_empty(self: Block) bool {
+        return std.mem.eql(u8, &[_]u8{0} ** hash_length, &self.hash);
     }
 };
 
@@ -98,8 +112,8 @@ pub fn main() !void {
     // Init genesis block.
     try blocks.append(Block{
         .index = 0,
-        .hash = [_]u8{0} ** block_hash_length,
-        .prev_hash = [_]u8{0} ** block_hash_length,
+        .hash = [_]u8{0} ** hash_length,
+        .prev_hash = [_]u8{0} ** hash_length,
         .timestamp = std.time.milliTimestamp(),
         .complexity = 0,
         .nonce = [_]u8{0} ** nonce_length,
@@ -166,8 +180,8 @@ fn mining_loop(rnd: *std.rand.Xoshiro256, state: *State) !void {
         fill_buf_random(rnd, &nonce);
         try state.blocks.append(Block{
             .index = state.blocks.getLast().index + 1,
-            .hash = [_]u8{0} ** block_hash_length,
-            .prev_hash = [_]u8{0} ** block_hash_length,
+            .hash = [_]u8{0} ** hash_length,
+            .prev_hash = [_]u8{0} ** hash_length,
             .timestamp = std.time.milliTimestamp(),
             .complexity = 0,
             .nonce = nonce,
@@ -217,17 +231,40 @@ test "test_block_encoding" {
     const index = 102_000_882_000_511;
     const block = Block{
         .index = index,
-        .hash = [_]u8{1} ** block_hash_length,
-        .prev_hash = [_]u8{2} ** block_hash_length,
+        .hash = [_]u8{1} ** hash_length,
+        .prev_hash = [_]u8{2} ** hash_length,
         .timestamp = std.time.milliTimestamp(),
         .complexity = 243,
         .nonce = [_]u8{3} ** nonce_length,
     };
-    const encoded = block.encode();
+    const block_bytes = block.to_bytes();
     try std.testing.expect(std.mem.eql(
         u8,
-        encoded[0..16],
+        block_bytes[0..16],
         &[16]u8{ 127, 162, 86, 238, 196, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     ));
-    try std.testing.expect(std.mem.readInt(u128, encoded[0..16], .little) == index);
+    try std.testing.expect(std.mem.readInt(u128, block_bytes[0..16], .little) == index);
+}
+
+test "test_block_hash" {
+    const index = 102_000_882_000_511;
+    var block = Block{
+        .index = index,
+        .hash = [_]u8{1} ** hash_length,
+        .prev_hash = [_]u8{2} ** hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 243,
+        .nonce = [_]u8{3} ** nonce_length,
+    };
+    try std.testing.expect(!block.is_hash_empty());
+    block.hash = [_]u8{0} ** hash_length;
+    // Execute it to have block.hash is not default but calculated.
+    const hash_1 = block.to_hash();
+    try std.testing.expect(!std.mem.eql(u8, &[_]u8{1} ** hash_length, &block.hash));
+    // Reset hash to not use calculated hash in a new calculation.
+    block.hash = [_]u8{0} ** hash_length;
+    try std.testing.expect(block.is_hash_empty());
+    // Hashes should be equal every time.
+    const hash_2 = block.to_hash();
+    try std.testing.expect(std.mem.eql(u8, &hash_1, &hash_2));
 }
