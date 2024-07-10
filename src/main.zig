@@ -14,6 +14,9 @@ pub const std_options = .{
 const hash_length = Sha256.digest_length;
 const nonce_length: usize = 256;
 
+const complexity_type = u8;
+const min_complexity: complexity_type = 1;
+
 // We use it to wait in threads loops until os signal will be received.
 // Note: in case of using two variables to wait for os signal: for example we are using separate bool variable and a mutex,
 // so we need to wait for this bool variable changes in main function (thread) in the separate thread,
@@ -38,7 +41,7 @@ const Block = struct {
     hash: [hash_length]u8,
     prev_hash: [hash_length]u8,
     timestamp: i64,
-    complexity: u8,
+    complexity: complexity_type,
     nonce: [nonce_length]u8,
 
     fn fields_size() comptime_int {
@@ -46,7 +49,7 @@ const Block = struct {
             hash_length +
             hash_length +
             @sizeOf(i64) +
-            @sizeOf(u8) +
+            @sizeOf(complexity_type) +
             nonce_length;
     }
 
@@ -70,8 +73,8 @@ const Block = struct {
         std.mem.writeInt(i64, buf[self_timestamp_fr..self_timestamp_to], self.timestamp, .little);
 
         const self_complexity_fr = self_timestamp_to;
-        const self_complexity_to = self_complexity_fr + @sizeOf(u8);
-        std.mem.writeInt(u8, buf[self_complexity_fr..self_complexity_to], self.complexity, .little);
+        const self_complexity_to = self_complexity_fr + @sizeOf(complexity_type);
+        std.mem.writeInt(complexity_type, buf[self_complexity_fr..self_complexity_to], self.complexity, .little);
 
         const self_nonce_fr = self_complexity_to;
         const self_nonce_to = self_nonce_fr + nonce_length;
@@ -87,6 +90,13 @@ const Block = struct {
         const hash = hasher.finalResult();
         self.hash = hash;
         return hash;
+    }
+
+    fn verify(self: *Block, prev_block: Block) error{HashesNotEqual}!void {
+        const hash = self.to_hash();
+        if (!std.mem.eql(u8, &self.hash, &hash)) return error.HashesNotEqual;
+        if (!std.mem.eql(u8, &self.prev_hash, &prev_block.hash)) return error.HashesNotEqual;
+        if (self.index - 1 != prev_block.index) return error.HashesNotEqual;
     }
 
     fn is_hash_empty(self: Block) bool {
@@ -110,7 +120,7 @@ pub fn main() !void {
     var blocks = std.ArrayList(Block).init(allocator);
     defer blocks.deinit();
     // Init genesis block.
-    var genesis_block = Block{
+    var genesis = Block{
         .index = 0,
         .hash = [_]u8{0} ** hash_length,
         .prev_hash = [_]u8{0} ** hash_length,
@@ -118,9 +128,9 @@ pub fn main() !void {
         .complexity = 0,
         .nonce = [_]u8{0} ** nonce_length,
     };
-    // To set genesis_block.hash.
-    _ = genesis_block.to_hash();
-    try blocks.append(genesis_block);
+    // To set genesis.hash.
+    _ = genesis.to_hash();
+    try blocks.append(genesis);
 
     var state = State{ .blocks = blocks };
 
@@ -179,20 +189,43 @@ fn mining_loop(rnd: *std.rand.Xoshiro256, state: *State) !void {
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     while (should_wait()) {
-        std.time.sleep(1_000_000_000); // 1s
-        fill_buf_random(rnd, &nonce);
-        const prev_block = state.blocks.getLast();
-        var new_block = Block{
-            .index = prev_block.index + 1,
-            .hash = [_]u8{0} ** hash_length,
-            .prev_hash = prev_block.hash,
-            .timestamp = std.time.milliTimestamp(),
-            .complexity = 0,
-            .nonce = nonce,
-        };
-        // To set new_block.hash.
-        _ = new_block.to_hash();
-        try state.blocks.append(new_block);
+        // Indicate that we found new hash with required complexity.
+        var new_hash_found = false;
+        var new_block: Block = undefined;
+        while (should_wait()) {
+            std.time.sleep(10_000_000); // 10ms
+            fill_buf_random(rnd, &nonce);
+            const prev_block = state.blocks.getLast();
+            new_block = Block{
+                .index = prev_block.index + 1,
+                .hash = [_]u8{0} ** hash_length,
+                .prev_hash = prev_block.hash,
+                .timestamp = std.time.milliTimestamp(),
+                .complexity = min_complexity,
+                .nonce = nonce,
+            };
+            // To set new_block.hash.
+            const new_hash = new_block.to_hash();
+            var hash_zeros_count: complexity_type = 0;
+            for (new_hash, 0..) |byte, i| {
+                if (byte == 0) {
+                    hash_zeros_count = @as(complexity_type, @intCast(i + 1));
+                    continue;
+                }
+                break;
+            }
+            if (hash_zeros_count == new_block.complexity) {
+                new_hash_found = true;
+                break;
+            }
+            try new_block.verify(prev_block);
+        }
+        // We need additional check there,
+        // because if SIGTERM received we exit loop with new block mining.
+        if (new_hash_found) {
+            log.debug("new block is found\n{any}", .{new_block});
+            try state.blocks.append(new_block);
+        }
     }
     log.info("mining loop stopped", .{});
 }
