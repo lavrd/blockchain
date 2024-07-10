@@ -110,14 +110,17 @@ pub fn main() !void {
     var blocks = std.ArrayList(Block).init(allocator);
     defer blocks.deinit();
     // Init genesis block.
-    try blocks.append(Block{
+    var genesis_block = Block{
         .index = 0,
         .hash = [_]u8{0} ** hash_length,
         .prev_hash = [_]u8{0} ** hash_length,
         .timestamp = std.time.milliTimestamp(),
         .complexity = 0,
         .nonce = [_]u8{0} ** nonce_length,
-    });
+    };
+    // To set genesis_block.hash.
+    _ = genesis_block.to_hash();
+    try blocks.append(genesis_block);
 
     var state = State{ .blocks = blocks };
 
@@ -151,7 +154,7 @@ pub fn main() !void {
     });
     std.debug.assert(state.blocks.items.len - 1 == state.blocks.getLast().index);
 
-    log.info("final successfully exiting...", .{});
+    log.info("finally successfully exiting...", .{});
 }
 
 fn wait_signal_loop() void {
@@ -178,14 +181,18 @@ fn mining_loop(rnd: *std.rand.Xoshiro256, state: *State) !void {
     while (should_wait()) {
         std.time.sleep(1_000_000_000); // 1s
         fill_buf_random(rnd, &nonce);
-        try state.blocks.append(Block{
-            .index = state.blocks.getLast().index + 1,
+        const prev_block = state.blocks.getLast();
+        var new_block = Block{
+            .index = prev_block.index + 1,
             .hash = [_]u8{0} ** hash_length,
-            .prev_hash = [_]u8{0} ** hash_length,
+            .prev_hash = prev_block.hash,
             .timestamp = std.time.milliTimestamp(),
             .complexity = 0,
             .nonce = nonce,
-        });
+        };
+        // To set new_block.hash.
+        _ = new_block.to_hash();
+        try state.blocks.append(new_block);
     }
     log.info("mining loop stopped", .{});
 }
