@@ -35,6 +35,7 @@ fn handleSignal(
 const State = struct {
     blocks: std.ArrayList(Block),
     mining_enabled: bool,
+    new_block_ch: Channel(Block),
 };
 
 const Block = struct {
@@ -111,6 +112,40 @@ const Block = struct {
     }
 };
 
+fn Channel(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        raw: ?T,
+        mutex: std.Thread.Mutex,
+
+        fn Init(value: ?T) Self {
+            return .{
+                .raw = value,
+                .mutex = .{},
+            };
+        }
+
+        fn send(self: *Self, data: T) void {
+            self.mutex.lock();
+            self.raw = data;
+            self.mutex.unlock();
+        }
+
+        fn receive(
+            self: *Self,
+        ) ?T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.raw) |raw| {
+                self.raw = null;
+                return raw;
+            }
+            return null;
+        }
+    };
+}
+
 pub fn main() !void {
     switch (builtin.os.tag) {
         .macos, .linux => {},
@@ -149,6 +184,7 @@ pub fn main() !void {
     var state = State{
         .blocks = blocks,
         .mining_enabled = mining_enabled,
+        .new_block_ch = Channel(Block).Init(null),
     };
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
@@ -157,7 +193,9 @@ pub fn main() !void {
         @as(*std.rand.Xoshiro256, &rnd),
         @as(*State, &state),
     });
-    const broadcast_loop_thread = try std.Thread.spawn(.{}, broadcastLoop, .{});
+    const broadcast_loop_thread = try std.Thread.spawn(.{}, broadcastLoop, .{
+        @as(*State, &state),
+    });
 
     var act = std.posix.Sigaction{
         .handler = .{ .sigaction = handleSignal },
@@ -278,16 +316,20 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
         // We need additional check there,
         // because if SIGTERM received we exit loop with new block mining.
         if (hash_found) {
-            log.debug("new block is found\n{any}", .{block});
             try state.blocks.append(block);
+            state.new_block_ch.send(block);
         }
     }
     log.info("mining loop stopped", .{});
 }
 
-fn broadcastLoop() void {
+fn broadcastLoop(state: *State) void {
     log.info("starting broadcast loop", .{});
-    while (shouldWait()) {}
+    while (shouldWait()) {
+        if (state.new_block_ch.receive()) |block| {
+            log.debug("new block is found\n{any}", .{block});
+        }
+    }
     log.info("broadcast loop stopped", .{});
 }
 
