@@ -92,13 +92,17 @@ const Block = struct {
         return hash;
     }
 
-    fn verify(self: *Block, prev_block: Block) error{HashesNotEqual}!void {
+    fn verify(self: *Block, prev_block: Block, current_complexity: complexity) error{
+        HashesNotEqual,
+        ComplexityMismatch,
+        TimestampTooEarly,
+    }!void {
         const hash = self.toHash();
         if (!std.mem.eql(u8, &self.hash, &hash)) return error.HashesNotEqual;
         if (!std.mem.eql(u8, &self.prev_hash, &prev_block.hash)) return error.HashesNotEqual;
         if (self.index - 1 != prev_block.index) return error.HashesNotEqual;
-        // todo: check complexity
-        // todo: check timestamp
+        if (self.complexity != current_complexity) return error.ComplexityMismatch;
+        if (self.timestamp <= prev_block.timestamp) return error.TimestampTooEarly;
     }
 
     fn isHashEmpty(self: Block) bool {
@@ -219,7 +223,7 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
                 hash_found = true;
                 break;
             }
-            try block.verify(prev_block);
+            try block.verify(prev_block, min_complexity);
         }
         // We need additional check there,
         // because if SIGTERM received we exit loop with new block mining.
