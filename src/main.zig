@@ -36,6 +36,9 @@ const State = struct {
     blocks: std.ArrayList(Block),
     mining_enabled: bool,
     new_block_ch: Channel(Block),
+    // Currently our cluster can contain up to 7 nodes.
+    // So current node + 6 peers.
+    nodes: [6]std.net.Ip4Address,
 };
 
 const Block = struct {
@@ -179,12 +182,41 @@ pub fn main() !void {
     if (envs.get("MINING")) |val| {
         if (std.mem.eql(u8, val, "1")) mining_enabled = true;
     }
+    var nodes: [6]std.net.Ip4Address = [_]std.net.Ip4Address{undefined} ** 6;
+    if (envs.get("NODES")) |val| {
+        var node_index: usize = 0;
+        var nodes_iter = std.mem.split(u8, val, ",");
+        while (nodes_iter.next()) |node| {
+            var node_iter = std.mem.split(u8, node, ":");
+            const raw_ip = node_iter.next().?;
+            const raw_port = node_iter.next().?;
+            const port: u16 = std.fmt.parseInt(u16, raw_port, 10) catch |err| {
+                log.err("failed to parse node port: {s}: {any}", .{ raw_port, err });
+                continue;
+            };
+            if (node_iter.rest().len != 0) {
+                log.err(
+                    "failed to parse node address; some data left after split: {s}:{s}",
+                    .{ raw_ip, raw_port },
+                );
+                continue;
+            }
+            const address = std.net.Ip4Address.parse(raw_ip, port) catch |err| {
+                log.err("failed to parse node address: {s}:{d}: {any}", .{ raw_ip, port, err });
+                continue;
+            };
+            nodes[node_index] = address;
+            log.debug("load {any} node address to communicate", .{address});
+            node_index += 1;
+        }
+    }
     envs.deinit();
 
     var state = State{
         .blocks = blocks,
         .mining_enabled = mining_enabled,
         .new_block_ch = Channel(Block).Init(null),
+        .nodes = nodes,
     };
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
