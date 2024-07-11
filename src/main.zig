@@ -112,9 +112,9 @@ const Block = struct {
 
 pub fn main() !void {
     switch (builtin.os.tag) {
-        .macos => {},
+        .macos, .linux => {},
         else => {
-            log.err("at the moment software is not working on any system except macOS", .{});
+            log.err("at the moment software is not working on any system except macOS or Linux", .{});
             return;
         },
     }
