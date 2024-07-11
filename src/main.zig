@@ -141,7 +141,7 @@ pub fn main() !void {
     var state = State{ .blocks = blocks };
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
-    const tcp_server_thread = try std.Thread.spawn(.{}, tcpServer, .{});
+    const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{});
     const mining_loop_thread = try std.Thread.spawn(.{}, miningLoop, .{
         @as(*std.rand.Xoshiro256, &rnd),
         @as(*State, &state),
@@ -159,7 +159,7 @@ pub fn main() !void {
 
     // Waiting for other threads to be stopped.
     http_server_thread.join();
-    tcp_server_thread.join();
+    udp_server_thread.join();
     mining_loop_thread.join();
     broadcast_loop_thread.join();
 
@@ -184,10 +184,48 @@ fn httpServer() void {
     log.info("http server stopped", .{});
 }
 
-fn tcpServer() void {
-    log.info("starting tcp server", .{});
-    while (shouldWait()) {}
-    log.info("tcp server stopped", .{});
+fn udpServer() !void {
+    log.info("starting udp server", .{});
+
+    // Initialize UDP server socket and bind an address.
+    const socket = try std.posix.socket(
+        std.posix.AF.INET,
+        std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK,
+        std.posix.IPPROTO.UDP,
+    );
+    defer std.posix.close(socket);
+    const port: u16 = 44600;
+    const addr = try std.net.Address.parseIp("127.0.0.1", port);
+    try std.posix.bind(socket, &addr.any, addr.getOsSockLen());
+
+    log.debug("udp server initialized; wait for new data on {d}", .{port});
+
+    var buffer: [1024]u8 = undefined;
+    var from_addr: std.posix.sockaddr = undefined;
+    var from_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+    while (shouldWait()) {
+        const n = std.posix.recvfrom(
+            socket,
+            buffer[0..],
+            0,
+            &from_addr,
+            &from_addr_len,
+        ) catch |e| switch (e) {
+            error.WouldBlock => continue,
+            else => return e,
+        };
+        const buf = buffer[0..n];
+        log.debug("received new data from {any}: {any}", .{ from_addr, buf });
+        _ = try std.posix.sendto(
+            socket,
+            buf,
+            0,
+            &from_addr,
+            from_addr_len,
+        );
+    }
+
+    log.info("udp server stopped", .{});
 }
 
 fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
@@ -198,7 +236,7 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
         var hash_found = false;
         var block: Block = undefined;
         while (shouldWait()) {
-            std.time.sleep(10_000_000); // 10ms
+            std.time.sleep(std.time.ns_per_ms * 10); // 10ms
             fillBufRandom(rnd, &nonce);
             const prev_block = state.blocks.getLast();
             block = Block{
@@ -245,7 +283,7 @@ fn shouldWait() bool {
     const wait_signal_state = wait_signal.load(std.builtin.AtomicOrder.monotonic);
     if (wait_signal_state) {
         // To not overload cpu.
-        std.time.sleep(5_000_000); // 5ms
+        std.time.sleep(std.time.ns_per_ms * 5); // 5ms
     }
     return wait_signal_state;
 }
