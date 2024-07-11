@@ -34,6 +34,7 @@ fn handleSignal(
 
 const State = struct {
     blocks: std.ArrayList(Block),
+    mining_enabled: bool,
 };
 
 const Block = struct {
@@ -138,7 +139,17 @@ pub fn main() !void {
     _ = genesis.toHash();
     try blocks.append(genesis);
 
-    var state = State{ .blocks = blocks };
+    var envs = try std.process.getEnvMap(allocator);
+    var mining_enabled = false;
+    if (envs.get("MINING")) |val| {
+        if (std.mem.eql(u8, val, "1")) mining_enabled = true;
+    }
+    envs.deinit();
+
+    var state = State{
+        .blocks = blocks,
+        .mining_enabled = mining_enabled,
+    };
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{});
@@ -163,10 +174,7 @@ pub fn main() !void {
     mining_loop_thread.join();
     broadcast_loop_thread.join();
 
-    log.debug("current blocks length is {d} and last index is {d}", .{
-        state.blocks.items.len,
-        state.blocks.getLast().index,
-    });
+    log.debug("current blocks length is {d}", .{state.blocks.items.len});
     std.debug.assert(state.blocks.items.len - 1 == state.blocks.getLast().index);
 
     log.info("finally successfully exiting...", .{});
@@ -229,6 +237,10 @@ fn udpServer() !void {
 }
 
 fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
+    if (!state.mining_enabled) {
+        log.info("mining loop is not started as mining is not enabled", .{});
+        return;
+    }
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     while (shouldWait()) {
