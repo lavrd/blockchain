@@ -37,9 +37,10 @@ const State = struct {
     blocks: std.ArrayList(Block),
     mining_enabled: bool,
     new_block_ch: Channel(Block),
+    rpc_packet_ch: Channel(NewRpcPacket),
     // Currently our cluster can contain up to 7 nodes.
     // So current node + 6 peers.
-    nodes: [6]std.net.Ip4Address,
+    nodes: [6]std.net.Address,
 };
 
 const Block = struct {
@@ -236,6 +237,11 @@ const RpcPacket = struct {
     }
 };
 
+const NewRpcPacket = struct {
+    addr: std.net.Address,
+    inner: RpcPacket,
+};
+
 pub fn main() !void {
     switch (builtin.os.tag) {
         .macos, .linux => {},
@@ -248,7 +254,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{
         .safety = true,
         .thread_safe = true,
-        .verbose_log = true,
+        .verbose_log = false,
     }){};
     const allocator = gpa.allocator();
 
@@ -277,19 +283,27 @@ pub fn main() !void {
     if (envs.get("MINING")) |val| {
         if (std.mem.eql(u8, val, "1")) mining_enabled = true;
     }
-    const nodes = parseEnvNodes(envs);
+    var port: u16 = 46400;
+    if (envs.get("PORT")) |val| {
+        port = try std.fmt.parseInt(u16, val, 10);
+    }
+    const nodes = try parseEnvNodes(envs);
     envs.deinit();
 
     var state = State{
         .blocks = blocks,
         .mining_enabled = mining_enabled,
         .new_block_ch = Channel(Block).Init(null),
+        .rpc_packet_ch = Channel(NewRpcPacket).Init(null),
         .nodes = nodes,
     };
     defer state.blocks.deinit();
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
-    const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{});
+    const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{
+        @as(*State, &state),
+        @as(u16, port),
+    });
     const mining_loop_thread = try std.Thread.spawn(.{}, miningLoop, .{
         @as(*std.rand.Xoshiro256, &rnd),
         @as(*State, &state),
@@ -331,7 +345,7 @@ fn httpServer() void {
     log.info("http server stopped", .{});
 }
 
-fn udpServer() !void {
+fn udpServer(state: *State, port: u16) !void {
     log.info("starting udp server", .{});
 
     // Initialize UDP server socket and bind an address.
@@ -341,7 +355,6 @@ fn udpServer() !void {
         std.posix.IPPROTO.UDP,
     );
     defer std.posix.close(socket);
-    const port: u16 = 44600;
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
     try std.posix.bind(socket, &addr.any, addr.getOsSockLen());
 
@@ -358,18 +371,23 @@ fn udpServer() !void {
             &from_addr,
             &from_addr_len,
         ) catch |e| switch (e) {
-            error.WouldBlock => continue,
+            error.WouldBlock => {
+                if (state.rpc_packet_ch.receive()) |rpc_packet| {
+                    std.debug.print("send rpc packet {any}\n", .{rpc_packet});
+                    _ = try std.posix.sendto(
+                        socket,
+                        &rpc_packet.inner.encode(),
+                        0,
+                        &rpc_packet.addr.any,
+                        rpc_packet.addr.getOsSockLen(),
+                    );
+                }
+                continue;
+            },
             else => return e,
         };
         const buf = buffer[0..n];
         log.debug("received new data from {any}: {any}", .{ from_addr, buf });
-        _ = try std.posix.sendto(
-            socket,
-            buf,
-            0,
-            &from_addr,
-            from_addr_len,
-        );
     }
 
     log.info("udp server stopped", .{});
@@ -429,6 +447,15 @@ fn broadcastLoop(state: *State) void {
     while (shouldWait()) {
         if (state.new_block_ch.receive()) |block| {
             log.debug("new block is found\n{any}", .{block});
+            for (state.nodes) |node| {
+                // Some of the nodes can be undefined, so it is a check.
+                if (node.in.sa.port == 0) continue;
+                log.debug("block can be send to {any} node", .{node});
+                state.rpc_packet_ch.send(NewRpcPacket{ .addr = node, .inner = RpcPacket{
+                    .event = RpcPacketEvent.NewBlock,
+                    .block = block,
+                } });
+            }
         }
     }
     log.info("broadcast loop stopped", .{});
@@ -449,8 +476,8 @@ fn fillBufRandom(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
     }
 }
 
-fn parseEnvNodes(envs: std.process.EnvMap) [6]std.net.Ip4Address {
-    var nodes: [6]std.net.Ip4Address = [_]std.net.Ip4Address{undefined} ** 6;
+fn parseEnvNodes(envs: std.process.EnvMap) ![6]std.net.Address {
+    var nodes: [6]std.net.Address = [_]std.net.Address{undefined} ** 6;
     if (envs.get("NODES")) |val| {
         var node_index: usize = 0;
         var nodes_iter = std.mem.split(u8, val, ",");
@@ -475,10 +502,7 @@ fn parseEnvNodes(envs: std.process.EnvMap) [6]std.net.Ip4Address {
                 );
                 continue;
             }
-            const address = std.net.Ip4Address.parse(raw_ip, port) catch |err| {
-                log.err("failed to parse node address: {s}:{d}: {any}", .{ raw_ip, port, err });
-                continue;
-            };
+            const address = try std.net.Address.parseIp4(raw_ip, port);
             nodes[node_index] = address;
             log.debug("load {any} node address to communicate", .{address});
             node_index += 1;
