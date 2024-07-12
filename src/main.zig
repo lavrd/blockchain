@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const time = @cImport({
-    @cInclude("time.h");
-});
+const time = @cImport(@cInclude("time.h"));
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 // Init scoped logger.
@@ -19,8 +17,6 @@ const nonce_length: usize = 256;
 
 const complexity_type = u8;
 const min_complexity: complexity_type = 1;
-
-const time_fmt_buf_size: usize = 20;
 
 // We use it to wait in threads loops until os signal will be received.
 // Note: in case of using two variables to wait for os signal: for example we are using separate bool variable and a mutex,
@@ -501,10 +497,10 @@ fn logFn(
     defer std.debug.unlockStdErr();
     const stderr = std.io.getStdErr().writer();
 
-    var buffer: [time_fmt_buf_size]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    var buf: [20]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
-    const time_str: []u8 = allocator.alloc(u8, time_fmt_buf_size) catch {
+    const time_str: []u8 = allocator.alloc(u8, buf.len) catch {
         nosuspend stderr.print(
             "cannot allocate memory to convert timestamp to string",
             .{},
@@ -516,13 +512,18 @@ fn logFn(
     const timestamp = time.time(null);
     const tm_info = time.localtime(&timestamp);
     _ = time.strftime(
-        time_str[0..time_fmt_buf_size],
-        time_fmt_buf_size,
+        time_str[0..buf.len],
+        buf.len,
         "%Y-%m-%d %H:%M:%S",
         tm_info,
     );
+
+    const scoped_level = comptime switch (scope) {
+        .gpa => std.log.Level.debug,
+        else => level,
+    };
     nosuspend stderr.print(
-        "{s} " ++ "[" ++ comptime level.asText() ++ "] " ++ "(" ++ @tagName(scope) ++ ") " ++ format ++ "\n",
+        "{s} " ++ "[" ++ comptime scoped_level.asText() ++ "] " ++ "(" ++ @tagName(scope) ++ ") " ++ format ++ "\n",
         .{time_str} ++ args,
     ) catch return;
 }
