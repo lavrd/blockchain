@@ -182,34 +182,7 @@ pub fn main() !void {
     if (envs.get("MINING")) |val| {
         if (std.mem.eql(u8, val, "1")) mining_enabled = true;
     }
-    var nodes: [6]std.net.Ip4Address = [_]std.net.Ip4Address{undefined} ** 6;
-    if (envs.get("NODES")) |val| {
-        var node_index: usize = 0;
-        var nodes_iter = std.mem.split(u8, val, ",");
-        while (nodes_iter.next()) |node| {
-            var node_iter = std.mem.split(u8, node, ":");
-            const raw_ip = node_iter.next().?;
-            const raw_port = node_iter.next().?;
-            const port: u16 = std.fmt.parseInt(u16, raw_port, 10) catch |err| {
-                log.err("failed to parse node port: {s}: {any}", .{ raw_port, err });
-                continue;
-            };
-            if (node_iter.rest().len != 0) {
-                log.err(
-                    "failed to parse node address; some data left after split: {s}:{s}",
-                    .{ raw_ip, raw_port },
-                );
-                continue;
-            }
-            const address = std.net.Ip4Address.parse(raw_ip, port) catch |err| {
-                log.err("failed to parse node address: {s}:{d}: {any}", .{ raw_ip, port, err });
-                continue;
-            };
-            nodes[node_index] = address;
-            log.debug("load {any} node address to communicate", .{address});
-            node_index += 1;
-        }
-    }
+    const nodes = parseEnvNodes(envs);
     envs.deinit();
 
     var state = State{
@@ -378,6 +351,44 @@ fn fillBufRandom(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
     for (0..nonce_length) |i| {
         nonce[i] = rnd.random().int(u8);
     }
+}
+
+fn parseEnvNodes(envs: std.process.EnvMap) [6]std.net.Ip4Address {
+    var nodes: [6]std.net.Ip4Address = [_]std.net.Ip4Address{undefined} ** 6;
+    if (envs.get("NODES")) |val| {
+        var node_index: usize = 0;
+        var nodes_iter = std.mem.split(u8, val, ",");
+        while (nodes_iter.next()) |node| {
+            var node_iter = std.mem.split(u8, node, ":");
+            const raw_ip_ = node_iter.next();
+            const raw_port_ = node_iter.next();
+            if (raw_ip_ == null or raw_port_ == null) {
+                log.err("failed to parse ip and port for node: {s}", .{node});
+                continue;
+            }
+            const raw_ip = raw_ip_.?;
+            const raw_port = raw_port_.?;
+            const port: u16 = std.fmt.parseInt(u16, raw_port, 10) catch |err| {
+                log.err("failed to parse node port: {s}: {any}", .{ raw_port, err });
+                continue;
+            };
+            if (node_iter.rest().len != 0) {
+                log.err(
+                    "failed to parse node address; some data left after split: {s}:{s}",
+                    .{ raw_ip, raw_port },
+                );
+                continue;
+            }
+            const address = std.net.Ip4Address.parse(raw_ip, port) catch |err| {
+                log.err("failed to parse node address: {s}:{d}: {any}", .{ raw_ip, port, err });
+                continue;
+            };
+            nodes[node_index] = address;
+            log.debug("load {any} node address to communicate", .{address});
+            node_index += 1;
+        }
+    }
+    return nodes;
 }
 
 fn logFn(
