@@ -14,8 +14,8 @@ pub const std_options = .{
 const hash_length = Sha256.digest_length;
 const nonce_length: usize = 256;
 
-const complexity = u8;
-const min_complexity: complexity = 1;
+const complexity_type = u8;
+const min_complexity: complexity_type = 1;
 
 // We use it to wait in threads loops until os signal will be received.
 // Note: in case of using two variables to wait for os signal: for example we are using separate bool variable and a mutex,
@@ -42,11 +42,13 @@ const State = struct {
 };
 
 const Block = struct {
+    const Self = @This();
+
     index: u128,
     hash: [hash_length]u8,
     prev_hash: [hash_length]u8,
     timestamp: i64,
-    complexity: complexity,
+    complexity: complexity_type,
     nonce: [nonce_length]u8,
 
     fn size() comptime_int {
@@ -54,11 +56,11 @@ const Block = struct {
             hash_length +
             hash_length +
             @sizeOf(i64) +
-            @sizeOf(complexity) +
+            @sizeOf(complexity_type) +
             nonce_length;
     }
 
-    fn toBytes(self: Block) [size()]u8 {
+    fn encode(self: Self) [size()]u8 {
         var buf = [_]u8{0} ** size();
 
         const index_from = 0;
@@ -78,8 +80,8 @@ const Block = struct {
         std.mem.writeInt(i64, buf[timestamp_from..timestamp_to], self.timestamp, .little);
 
         const complexity_from = timestamp_to;
-        const complexity_to = complexity_from + @sizeOf(complexity);
-        std.mem.writeInt(complexity, buf[complexity_from..complexity_to], self.complexity, .little);
+        const complexity_to = complexity_from + @sizeOf(complexity_type);
+        std.mem.writeInt(complexity_type, buf[complexity_from..complexity_to], self.complexity, .little);
 
         const nonce_from = complexity_to;
         const nonce_to = nonce_from + nonce_length;
@@ -88,16 +90,54 @@ const Block = struct {
         return buf;
     }
 
-    fn toHash(self: *Block) [Sha256.digest_length]u8 {
+    fn decode(buf: *const [size()]u8) Self {
+        const index_from = 0;
+        const index_to = index_from + @sizeOf(u128);
+        const index = std.mem.readInt(u128, buf[index_from..index_to], .little);
+
+        const hash_from = index_to;
+        const hash_to = hash_from + hash_length;
+        var hash: [hash_length]u8 = [_]u8{0} ** hash_length;
+        @memcpy(&hash, buf[hash_from..hash_to]);
+
+        const prev_hash_from = hash_to;
+        const prev_hash_to = prev_hash_from + hash_length;
+        var prev_hash = [_]u8{0} ** hash_length;
+        @memcpy(&prev_hash, buf[prev_hash_from..prev_hash_to]);
+
+        const timestamp_from = prev_hash_to;
+        const timestamp_to = timestamp_from + @sizeOf(i64);
+        const timestamp = std.mem.readInt(i64, buf[timestamp_from..timestamp_to], .little);
+
+        const complexity_from = timestamp_to;
+        const complexity_to = complexity_from + @sizeOf(complexity_type);
+        const complexity = std.mem.readInt(complexity_type, buf[complexity_from..complexity_to], .little);
+
+        const nonce_from = complexity_to;
+        const nonce_to = nonce_from + nonce_length;
+        var nonce = [_]u8{0} ** nonce_length;
+        @memcpy(&nonce, buf[nonce_from..nonce_to]);
+
+        return Self{
+            .index = index,
+            .hash = hash,
+            .prev_hash = prev_hash,
+            .timestamp = timestamp,
+            .complexity = complexity,
+            .nonce = nonce,
+        };
+    }
+
+    fn toHash(self: *Self) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        const block_bytes = self.toBytes();
-        hasher.update(&block_bytes);
+        const buf = self.encode();
+        hasher.update(&buf);
         const hash = hasher.finalResult();
         self.hash = hash;
         return hash;
     }
 
-    fn verify(self: *Block, prev_block: Block, current_complexity: complexity) error{
+    fn verify(self: *Self, prev_block: Self, current_complexity: complexity_type) error{
         HashesNotEqual,
         ComplexityMismatch,
         TimestampTooEarly,
@@ -110,7 +150,7 @@ const Block = struct {
         if (self.timestamp <= prev_block.timestamp) return error.TimestampTooEarly;
     }
 
-    fn isHashEmpty(self: Block) bool {
+    fn isHashEmpty(self: Self) bool {
         return std.mem.eql(u8, &[_]u8{0} ** hash_length, &self.hash);
     }
 };
@@ -148,6 +188,52 @@ fn Channel(comptime T: type) type {
         }
     };
 }
+
+const rpc_packet_event_type = u8;
+
+const RpcPacketEvent = enum(rpc_packet_event_type) {
+    NewBlock = 1,
+};
+
+const RpcPacket = struct {
+    const Self = @This();
+
+    event: RpcPacketEvent,
+    block: Block,
+
+    fn size() comptime_int {
+        return comptime @sizeOf(RpcPacketEvent) + Block.size();
+    }
+
+    fn encode(self: Self) [size()]u8 {
+        var buf = [_]u8{0} ** size();
+        std.mem.writeInt(
+            rpc_packet_event_type,
+            buf[0..@sizeOf(rpc_packet_event_type)],
+            @intFromEnum(self.event),
+            .little,
+        );
+        const block = self.block.encode();
+        @memcpy(buf[@sizeOf(rpc_packet_event_type)..], &block);
+        return buf;
+    }
+
+    fn decode(buf: *const [size()]u8) Self {
+        const event: RpcPacketEvent = @enumFromInt(
+            std.mem.readInt(
+                rpc_packet_event_type,
+                buf[0..@sizeOf(rpc_packet_event_type)],
+                .little,
+            ),
+        );
+        const rest: *const [Block.size()]u8 = buf[@sizeOf(rpc_packet_event_type)..];
+        const block = Block.decode(rest);
+        return Self{
+            .event = event,
+            .block = block,
+        };
+    }
+};
 
 pub fn main() !void {
     switch (builtin.os.tag) {
@@ -295,10 +381,10 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
     }
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
+    var block: Block = undefined;
     while (shouldWait()) {
         // Indicate that we found new hash with required complexity.
         var hash_found = false;
-        var block: Block = undefined;
         while (shouldWait()) {
             std.time.sleep(std.time.ns_per_ms * 10); // 10ms
             fillBufRandom(rnd, &nonce);
@@ -313,10 +399,10 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
             };
             // To set new_block.hash.
             const hash = block.toHash();
-            var hash_leading_zeros: complexity = 0;
+            var hash_leading_zeros: complexity_type = 0;
             for (hash, 0..) |byte, i| {
                 if (byte == 0) {
-                    hash_leading_zeros = @as(complexity, @intCast(i + 1));
+                    hash_leading_zeros = @as(complexity_type, @intCast(i + 1));
                     continue;
                 }
                 break;
@@ -426,13 +512,13 @@ test "test_block_encoding" {
         .complexity = 243,
         .nonce = [_]u8{3} ** nonce_length,
     };
-    const block_bytes = block.toBytes();
+    const buf = block.encode();
     try std.testing.expect(std.mem.eql(
         u8,
-        block_bytes[0..16],
+        buf[0..16],
         &[16]u8{ 127, 162, 86, 238, 196, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     ));
-    try std.testing.expect(std.mem.readInt(u128, block_bytes[0..16], .little) == index);
+    try std.testing.expect(std.mem.readInt(u128, buf[0..16], .little) == index);
 }
 
 test "test_block_hash" {
@@ -456,4 +542,27 @@ test "test_block_hash" {
     // Hashes should be equal every time.
     const hash_2 = block.toHash();
     try std.testing.expect(std.mem.eql(u8, &hash_1, &hash_2));
+}
+
+test "test_rpc_packet_encode_decode" {
+    const index = 102_000_882_000_511;
+    const block = Block{
+        .index = index,
+        .hash = [_]u8{1} ** hash_length,
+        .prev_hash = [_]u8{2} ** hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 243,
+        .nonce = [_]u8{3} ** nonce_length,
+    };
+    var rpc_packet = RpcPacket{
+        .event = RpcPacketEvent.NewBlock,
+        .block = block,
+    };
+    const buf = rpc_packet.encode();
+    rpc_packet = RpcPacket.decode(&buf);
+    try std.testing.expect(RpcPacketEvent.NewBlock == rpc_packet.event);
+    try std.testing.expect(index == rpc_packet.block.index);
+    try std.testing.expect(std.mem.eql(u8, &[_]u8{1} ** hash_length, &rpc_packet.block.hash));
+    try std.testing.expect(std.mem.eql(u8, &[_]u8{2} ** hash_length, &rpc_packet.block.prev_hash));
+    try std.testing.expect(std.mem.eql(u8, &[_]u8{3} ** nonce_length, &rpc_packet.block.nonce));
 }

@@ -7,6 +7,7 @@ Simple blockchain implementation for demo purposes.
 ```shell
 make build
 make test
+mame test_one name=test_rpc_packet_encode_decode
 make run
 ```
 
