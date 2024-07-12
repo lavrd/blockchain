@@ -502,7 +502,7 @@ fn logFn(
     const allocator = fba.allocator();
     const time_str: []u8 = allocator.alloc(u8, buf.len) catch {
         nosuspend stderr.print(
-            "cannot allocate memory to convert timestamp to string",
+            "failed to allocate memory to convert timestamp to string\n",
             .{},
         ) catch return;
         return;
@@ -510,13 +510,23 @@ fn logFn(
     defer allocator.free(time_str);
 
     const timestamp = time.time(null);
+    if (timestamp == -1) {
+        nosuspend stderr.print("failed to retrieve current time from time.h\n", .{}) catch return;
+        return;
+    }
     const tm_info = time.localtime(&timestamp);
-    _ = time.strftime(
+    const n = time.strftime(
         time_str[0..buf.len],
         buf.len,
         "%Y-%m-%d %H:%M:%S",
         tm_info,
     );
+    // We need to compare with buf length - 1 because returning length
+    // doesn't contain terminating null character.
+    if (n != buf.len - 1) {
+        nosuspend stderr.print("failed to format current timestamp using time.h: {d}\n", .{n}) catch return;
+        return;
+    }
 
     const scoped_level = comptime switch (scope) {
         .gpa => std.log.Level.debug,
