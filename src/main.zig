@@ -158,12 +158,20 @@ pub fn main() !void {
         },
     }
 
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        .safety = true,
+        .thread_safe = true,
+        .verbose_log = true,
+    }){};
+    const allocator = gpa.allocator();
 
     var rnd = std.rand.DefaultPrng.init(0);
 
     var blocks = std.ArrayList(Block).init(allocator);
-    defer blocks.deinit();
+    // Do not make defer blocks.deinit() here
+    // because in state.blocks memory pointer will be updated
+    // when array with blocks grows.
+
     // Init genesis block.
     var genesis = Block{
         .index = 0,
@@ -191,6 +199,7 @@ pub fn main() !void {
         .new_block_ch = Channel(Block).Init(null),
         .nodes = nodes,
     };
+    defer state.blocks.deinit();
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{});
