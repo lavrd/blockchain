@@ -69,7 +69,7 @@ const Block = struct {
             nonce_length;
     }
 
-    fn encode(self: Self) [size()]u8 {
+    fn encode(self: *const Self) [size()]u8 {
         var buf = [_]u8{0} ** size();
 
         const index_from = 0;
@@ -137,21 +137,30 @@ const Block = struct {
         };
     }
 
-    fn toHash(self: *Self) [Sha256.digest_length]u8 {
+    fn toHashNoUpate(self: *const Self) [hash_length]u8 {
         var hasher = Sha256.init(.{});
-        const buf = self.encode();
+        var buf = self.encode();
+        // We need to omit already existing hash to calculate every time the same hash
+        // and do not use hash from previous function call or already existing.
+        for (@sizeOf(u128)..@sizeOf(u128) + hash_length) |i| {
+            buf[i] = 0;
+        }
         hasher.update(&buf);
         const hash = hasher.finalResult();
-        self.hash = hash;
         return hash;
     }
 
-    fn verify(self: *Self, prev_block: Self, current_complexity: complexity_type) error{
+    fn toHash(self: *Self) [hash_length]u8 {
+        self.hash = self.toHashNoUpate();
+        return self.hash;
+    }
+
+    fn verify(self: *const Self, prev_block: *const Self, current_complexity: complexity_type) error{
         HashesNotEqual,
         ComplexityMismatch,
         TimestampTooEarly,
     }!void {
-        const hash = self.toHash();
+        const hash = self.toHashNoUpate();
         if (!std.mem.eql(u8, &self.hash, &hash)) return error.HashesNotEqual;
         if (!std.mem.eql(u8, &self.prev_hash, &prev_block.hash)) return error.HashesNotEqual;
         if (self.index - 1 != prev_block.index) return error.HashesNotEqual;
@@ -159,7 +168,7 @@ const Block = struct {
         if (self.timestamp <= prev_block.timestamp) return error.TimestampTooEarly;
     }
 
-    fn isHashEmpty(self: Self) bool {
+    fn isHashEmpty(self: *const Self) bool {
         return std.mem.eql(u8, &[_]u8{0} ** hash_length, &self.hash);
     }
 };
@@ -208,7 +217,7 @@ const RpcPacket = struct {
         return comptime @sizeOf(RpcPacketEvent) + Block.size();
     }
 
-    fn encode(self: Self) [size()]u8 {
+    fn encode(self: *const Self) [size()]u8 {
         var buf = [_]u8{0} ** size();
         std.mem.writeInt(
             rpc_packet_event_type,
@@ -261,24 +270,6 @@ pub fn main() !void {
 
     var rnd = std.rand.DefaultPrng.init(0);
 
-    var blocks = std.ArrayList(Block).init(allocator);
-    // Do not make defer blocks.deinit() here
-    // because in state.blocks memory pointer will be updated
-    // when array with blocks grows.
-
-    // Init genesis block.
-    var genesis = Block{
-        .index = 0,
-        .hash = [_]u8{0} ** hash_length,
-        .prev_hash = [_]u8{0} ** hash_length,
-        .timestamp = std.time.milliTimestamp(),
-        .complexity = 0,
-        .nonce = [_]u8{0} ** nonce_length,
-    };
-    // To set genesis.hash.
-    _ = genesis.toHash();
-    try blocks.append(genesis);
-
     var envs = try std.process.getEnvMap(allocator);
     var mining_enabled = false;
     if (envs.get("MINING")) |val| {
@@ -289,7 +280,34 @@ pub fn main() !void {
         port = try std.fmt.parseInt(u16, val, 10);
     }
     const nodes = try parseEnvNodes(envs);
+    var genesis: Block = undefined;
+    if (envs.get("GENESIS")) |val| {
+        var buf: [Block.size()]u8 = [_]u8{0} ** Block.size();
+        _ = try std.fmt.hexToBytes(&buf, val);
+        genesis = Block.decode(&buf);
+        log.debug("configured genesis block:\n{any}", .{genesis});
+    } else {
+        // Init genesis block.
+        genesis = Block{
+            .index = 0,
+            .hash = [_]u8{0} ** hash_length,
+            .prev_hash = [_]u8{0} ** hash_length,
+            .timestamp = std.time.milliTimestamp(),
+            .complexity = 0,
+            .nonce = [_]u8{0} ** nonce_length,
+        };
+        // To calculate and set genesis.hash.
+        _ = genesis.toHash();
+        const genesis_hex = std.fmt.bytesToHex(genesis.encode(), .lower);
+        log.info("newly generated genesis block: {s}\n{any}", .{ genesis_hex, genesis });
+    }
     envs.deinit();
+
+    var blocks = std.ArrayList(Block).init(allocator);
+    // Do not make defer blocks.deinit() here
+    // because in state.blocks memory pointer will be updated
+    // when array with blocks grows.
+    try blocks.append(genesis);
 
     var state = State{
         .blocks = blocks,
@@ -374,7 +392,7 @@ fn udpServer(state: *State, port: u16) !void {
         ) catch |e| switch (e) {
             error.WouldBlock => {
                 if (state.rpc_packet_ch.receive()) |rpc_packet| {
-                    std.debug.print("send rpc packet {any}\n", .{rpc_packet});
+                    log.debug("send rpc packet {any}", .{rpc_packet});
                     const buf = rpc_packet.inner.encode();
                     const n = try std.posix.sendto(
                         socket,
@@ -442,10 +460,10 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
                 break;
             }
             if (hash_leading_zeros == block.complexity) {
+                try block.verify(&prev_block, min_complexity);
                 hash_found = true;
                 break;
             }
-            try block.verify(prev_block, min_complexity);
         }
         // We need additional check there,
         // because if SIGTERM received we exit loop with new block mining.
@@ -528,6 +546,8 @@ fn parseEnvNodes(envs: std.process.EnvMap) ![6]std.net.Address {
 fn handle_rpc_packet(state: *State, rpc_packet: RpcPacketExt) !void {
     switch (rpc_packet.inner.event) {
         .NewBlock => {
+            const prev_block = state.blocks.getLast();
+            try rpc_packet.inner.block.verify(&prev_block, min_complexity);
             try state.blocks.append(rpc_packet.inner.block);
             state.rpc_packet_ch.send(RpcPacketExt{ .addr = rpc_packet.addr, .inner = RpcPacket{
                 .event = RpcPacketEvent.BlockApproved,
@@ -535,6 +555,8 @@ fn handle_rpc_packet(state: *State, rpc_packet: RpcPacketExt) !void {
             } });
         },
         .BlockApproved => {
+            const prev_block = state.blocks.getLast();
+            try rpc_packet.inner.block.verify(&prev_block, min_complexity);
             try state.blocks.append(rpc_packet.inner.block);
         },
     }
