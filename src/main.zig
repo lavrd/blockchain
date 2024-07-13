@@ -18,6 +18,13 @@ const nonce_length: usize = 256;
 const complexity_type = u8;
 const min_complexity: complexity_type = 1;
 
+const rpc_packet_event_type = u8;
+
+const RpcPacketEvent = enum(rpc_packet_event_type) {
+    NewBlock = 1,
+    BlockApproved = 2,
+};
+
 // We use it to wait in threads loops until os signal will be received.
 // Note: in case of using two variables to wait for os signal: for example we are using separate bool variable and a mutex,
 // so we need to wait for this bool variable changes in main function (thread) in the separate thread,
@@ -36,7 +43,7 @@ fn handleSignal(
 const State = struct {
     blocks: std.ArrayList(Block),
     mining_enabled: bool,
-    new_block_ch: Channel(Block),
+    mined_block_ch: Channel(Block),
     rpc_packet_ch: Channel(RpcPacketExt),
     // Currently our cluster can contain up to 7 nodes.
     // So current node + 6 peers.
@@ -191,12 +198,6 @@ fn Channel(comptime T: type) type {
     };
 }
 
-const rpc_packet_event_type = u8;
-
-const RpcPacketEvent = enum(rpc_packet_event_type) {
-    NewBlock = 1,
-};
-
 const RpcPacket = struct {
     const Self = @This();
 
@@ -293,7 +294,7 @@ pub fn main() !void {
     var state = State{
         .blocks = blocks,
         .mining_enabled = mining_enabled,
-        .new_block_ch = Channel(Block).Init(null),
+        .mined_block_ch = Channel(Block).Init(null),
         .rpc_packet_ch = Channel(RpcPacketExt).Init(null),
         .nodes = nodes,
     };
@@ -392,7 +393,16 @@ fn udpServer(state: *State, port: u16) !void {
             else => return e,
         };
         const buf = buffer[0..n];
-        log.debug("received new data from {any}: {any}", .{ from_addr, buf });
+        if (buf.len != RpcPacket.size()) {
+            log.debug("received invalid rpc packaet from {any}: {any}", .{ from_addr, buf });
+            continue;
+        }
+        const rpc_packet = RpcPacket.decode(buf[0..RpcPacket.size()]);
+        log.debug("received new rpc packet from {any}: {any}", .{ from_addr, rpc_packet });
+        try handle_rpc_packet(state, RpcPacketExt{
+            .addr = std.net.Address.initPosix(@as(*align(4) std.posix.sockaddr, @alignCast(&from_addr))),
+            .inner = rpc_packet,
+        });
     }
 
     log.info("udp server stopped", .{});
@@ -421,7 +431,7 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
                 .complexity = min_complexity,
                 .nonce = nonce,
             };
-            // To set new_block.hash.
+            // To set block.hash.
             const hash = block.toHash();
             var hash_leading_zeros: complexity_type = 0;
             for (hash, 0..) |byte, i| {
@@ -440,8 +450,7 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
         // We need additional check there,
         // because if SIGTERM received we exit loop with new block mining.
         if (hash_found) {
-            try state.blocks.append(block);
-            state.new_block_ch.send(block);
+            state.mined_block_ch.send(block);
         }
     }
     log.info("mining loop stopped", .{});
@@ -450,7 +459,7 @@ fn miningLoop(rnd: *std.rand.Xoshiro256, state: *State) !void {
 fn broadcastLoop(state: *State) void {
     log.info("starting broadcast loop", .{});
     while (shouldWait()) {
-        if (state.new_block_ch.receive()) |block| {
+        if (state.mined_block_ch.receive()) |block| {
             log.debug("new block is found\n{any}", .{block});
             for (state.nodes) |node| {
                 // Some of the nodes can be undefined, so it is a check.
@@ -514,6 +523,21 @@ fn parseEnvNodes(envs: std.process.EnvMap) ![6]std.net.Address {
         }
     }
     return nodes;
+}
+
+fn handle_rpc_packet(state: *State, rpc_packet: RpcPacketExt) !void {
+    switch (rpc_packet.inner.event) {
+        .NewBlock => {
+            try state.blocks.append(rpc_packet.inner.block);
+            state.rpc_packet_ch.send(RpcPacketExt{ .addr = rpc_packet.addr, .inner = RpcPacket{
+                .event = RpcPacketEvent.BlockApproved,
+                .block = rpc_packet.inner.block,
+            } });
+        },
+        .BlockApproved => {
+            try state.blocks.append(rpc_packet.inner.block);
+        },
+    }
 }
 
 fn logFn(
