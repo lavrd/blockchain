@@ -37,7 +37,7 @@ const State = struct {
     blocks: std.ArrayList(Block),
     mining_enabled: bool,
     new_block_ch: Channel(Block),
-    rpc_packet_ch: Channel(NewRpcPacket),
+    rpc_packet_ch: Channel(RpcPacketExt),
     // Currently our cluster can contain up to 7 nodes.
     // So current node + 6 peers.
     nodes: [6]std.net.Address,
@@ -237,7 +237,7 @@ const RpcPacket = struct {
     }
 };
 
-const NewRpcPacket = struct {
+const RpcPacketExt = struct {
     addr: std.net.Address,
     inner: RpcPacket,
 };
@@ -294,7 +294,7 @@ pub fn main() !void {
         .blocks = blocks,
         .mining_enabled = mining_enabled,
         .new_block_ch = Channel(Block).Init(null),
-        .rpc_packet_ch = Channel(NewRpcPacket).Init(null),
+        .rpc_packet_ch = Channel(RpcPacketExt).Init(null),
         .nodes = nodes,
     };
     defer state.blocks.deinit();
@@ -374,13 +374,18 @@ fn udpServer(state: *State, port: u16) !void {
             error.WouldBlock => {
                 if (state.rpc_packet_ch.receive()) |rpc_packet| {
                     std.debug.print("send rpc packet {any}\n", .{rpc_packet});
-                    _ = try std.posix.sendto(
+                    const buf = rpc_packet.inner.encode();
+                    const n = try std.posix.sendto(
                         socket,
-                        &rpc_packet.inner.encode(),
+                        &buf,
                         0,
                         &rpc_packet.addr.any,
                         rpc_packet.addr.getOsSockLen(),
                     );
+                    if (n != buf.len) {
+                        log.err("not enough data was written to the socket: {d}\n", .{n});
+                        continue;
+                    }
                 }
                 continue;
             },
@@ -451,7 +456,7 @@ fn broadcastLoop(state: *State) void {
                 // Some of the nodes can be undefined, so it is a check.
                 if (node.in.sa.port == 0) continue;
                 log.debug("block can be send to {any} node", .{node});
-                state.rpc_packet_ch.send(NewRpcPacket{ .addr = node, .inner = RpcPacket{
+                state.rpc_packet_ch.send(RpcPacketExt{ .addr = node, .inner = RpcPacket{
                     .event = RpcPacketEvent.NewBlock,
                     .block = block,
                 } });
