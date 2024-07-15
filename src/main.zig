@@ -178,7 +178,6 @@ fn TSArrayList(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        // Do not use this variable outside of this structure.
         _inner: std.ArrayList(T),
         mutex: std.Thread.Mutex,
 
@@ -189,7 +188,7 @@ fn TSArrayList(comptime T: type) type {
             };
         }
 
-        fn get(self: *Self) LockedTSArrayList(T) {
+        fn lock(self: *Self) LockedTSArrayList(T) {
             self.mutex.lock();
             return LockedTSArrayList(T).Init(&self._inner, &self.mutex);
         }
@@ -201,17 +200,17 @@ fn LockedTSArrayList(comptime T: type) type {
         const Self = @This();
 
         inner: *std.ArrayList(T),
-        mutex: *std.Thread.Mutex,
+        _mutex: *std.Thread.Mutex,
 
         fn Init(value: *std.ArrayList(T), mutex: *std.Thread.Mutex) Self {
             return .{
                 .inner = value,
-                .mutex = mutex,
+                ._mutex = mutex,
             };
         }
 
         fn unlock(self: *Self) void {
-            self.mutex.unlock();
+            self._mutex.unlock();
         }
     };
 }
@@ -360,6 +359,11 @@ pub fn main() !void {
         .rpc_packet_ch = Channel(RpcPacketExt).Init(null),
         .nodes = nodes,
     };
+    defer {
+        var blocks = state.blocks.lock();
+        blocks.inner.deinit();
+        blocks.unlock();
+    }
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{
@@ -389,14 +393,9 @@ pub fn main() !void {
     mining_loop_thread.join();
     broadcast_loop_thread.join();
 
-    var blocks = state.blocks.get();
+    var blocks = state.blocks.lock();
     log.debug("current blocks length is {d}", .{blocks.inner.items.len});
     std.debug.assert(blocks.inner.items.len - 1 == blocks.inner.getLast().index);
-    defer {
-        var blocks_to_free = state.blocks.get();
-        blocks_to_free.inner.deinit();
-        blocks_to_free.unlock();
-    }
     blocks.unlock();
 
     log.info("finally successfully exiting...", .{});
@@ -488,7 +487,6 @@ fn miningLoop(state: *State, rnd: *std.rand.Xoshiro256) !void {
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     var block: Block = undefined;
     while (shouldWait()) {
-        // Indicate that we found new hash with required complexity.
         while (shouldWait()) {
             std.time.sleep(std.time.ns_per_ms * 10); // 10ms
             try mineBlock(state, rnd, &nonce, &block);
@@ -533,7 +531,7 @@ fn fillBufRandom(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
 
 fn mineBlock(state: *State, rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8, block: *Block) !void {
     fillBufRandom(rnd, nonce);
-    var blocks = state.blocks.get();
+    var blocks = state.blocks.lock();
     defer blocks.unlock();
     const prev_block = blocks.inner.getLast();
     block.* = Block{
@@ -596,7 +594,7 @@ fn parseEnvNodes(envs: std.process.EnvMap) ![6]std.net.Address {
 }
 
 fn handle_rpc_packet(state: *State, rpc_packet: RpcPacketExt) !void {
-    var blocks = state.blocks.get();
+    var blocks = state.blocks.lock();
     defer blocks.unlock();
     const prev_block = blocks.inner.getLast();
     try rpc_packet.inner.block.verify(&prev_block, min_complexity);
