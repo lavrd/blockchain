@@ -432,7 +432,7 @@ pub fn main() !void {
 
 fn waitSignalLoop() void {
     log.info("starting to wait for os signal", .{});
-    _ = shouldWait(true, 0);
+    _ = shouldWait(0);
     log.info("exiting os signal waiting loop", .{});
 }
 
@@ -454,7 +454,7 @@ fn udpServer(state: *State, port: u16) !void {
     var buffer: [1024]u8 = undefined;
     var from_addr: std.posix.sockaddr = undefined;
     var from_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-    while (shouldWait(false, 5)) {
+    while (shouldWait(5)) {
         const n = std.posix.recvfrom(
             socket,
             buffer[0..],
@@ -509,7 +509,7 @@ fn miningLoop(state: *State, rnd: *std.rand.Xoshiro256) !void {
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     var block: Block = undefined;
-    while (shouldWait(false, 10)) {
+    while (shouldWait(10)) {
         try mineBlock(state, rnd, &nonce, &block);
     }
     log.info("mining loop stopped", .{});
@@ -537,10 +537,10 @@ fn broadcastLoop(state: *State) void {
     }
 }
 
-fn shouldWait(static: bool, ms: u64) bool {
+fn shouldWait(ms: u64) bool {
     wait_signal_mutex.lock();
     defer wait_signal_mutex.unlock();
-    if (static) {
+    if (ms == 0) {
         wait_signal_cond.wait(&wait_signal_mutex);
     } else {
         wait_signal_cond.timedWait(&wait_signal_mutex, ms * std.time.ns_per_ms) catch |err| switch (err) {
