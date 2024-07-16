@@ -25,11 +25,9 @@ const RpcPacketEvent = enum(rpc_packet_event_type) {
     BlockApproved = 2,
 };
 
-// We use it to wait in threads loops until os signal will be received.
-// Note: in case of using two variables to wait for os signal: for example we are using separate bool variable and a mutex,
-// so we need to wait for this bool variable changes in main function (thread) in the separate thread,
-// otherwise deadlock, because mutex will be acquired in the same thread.
-var wait_signal = std.atomic.Value(bool).init(true);
+var wait_signal = true;
+var wait_signal_mutex = std.Thread.Mutex{};
+var wait_signal_cond = std.Thread.Condition{};
 
 fn handleSignal(
     signal: i32,
@@ -37,7 +35,10 @@ fn handleSignal(
     _: ?*anyopaque,
 ) callconv(.C) void {
     log.debug("os signal received: {d}", .{signal});
-    wait_signal.store(false, std.builtin.AtomicOrder.monotonic);
+    wait_signal_mutex.lock();
+    defer wait_signal_mutex.unlock();
+    wait_signal = false;
+    wait_signal_cond.broadcast();
 }
 
 const State = struct {
@@ -179,18 +180,18 @@ fn TSArrayList(comptime T: type) type {
         const Self = @This();
 
         _inner: std.ArrayList(T),
-        mutex: std.Thread.Mutex,
+        _mutex: std.Thread.Mutex,
 
         fn Init(value: std.ArrayList(T)) Self {
             return .{
                 ._inner = value,
-                .mutex = .{},
+                ._mutex = .{},
             };
         }
 
         fn lock(self: *Self) LockedTSArrayList(T) {
-            self.mutex.lock();
-            return LockedTSArrayList(T).Init(&self._inner, &self.mutex);
+            self._mutex.lock();
+            return LockedTSArrayList(T).Init(&self._inner, &self._mutex);
         }
     };
 }
@@ -219,29 +220,55 @@ fn Channel(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        raw: ?T,
-        mutex: std.Thread.Mutex,
+        _raw: ?T,
+        _mutex: std.Thread.Mutex,
+        _cond: std.Thread.Condition,
 
         fn Init(value: ?T) Self {
             return .{
-                .raw = value,
-                .mutex = .{},
+                ._raw = value,
+                ._mutex = .{},
+                ._cond = .{},
             };
         }
 
         fn send(self: *Self, data: T) void {
-            self.mutex.lock();
-            self.raw = data;
-            self.mutex.unlock();
+            self._mutex.lock();
+            defer self._mutex.unlock();
+            self._raw = data;
+            self._cond.signal();
         }
 
-        fn receive(
+        fn try_receive(
             self: *Self,
         ) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            if (self.raw) |raw| {
-                self.raw = null;
+            self._mutex.lock();
+            defer self._mutex.unlock();
+            return self._change();
+        }
+
+        fn receive(self: *Self) ?T {
+            self._mutex.lock();
+            defer self._mutex.unlock();
+            self._cond.wait(&self._mutex);
+            return self._change();
+        }
+
+        fn close(self: *Self) void {
+            self._mutex.lock();
+            defer self._mutex.unlock();
+            // Currently channel works like that:
+            // - If someone wait using "receive" function
+            // - And cond wakes up
+            // - And value in null
+            // - It means channel is closed.
+            self._raw = null;
+            self._cond.signal();
+        }
+
+        fn _change(self: *Self) ?T {
+            if (self._raw) |raw| {
+                self._raw = null;
                 return raw;
             }
             return null;
@@ -365,7 +392,6 @@ pub fn main() !void {
         blocks.unlock();
     }
 
-    const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{});
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{
         @as(*State, &state),
         @as(u16, port),
@@ -386,9 +412,9 @@ pub fn main() !void {
     var oact: std.posix.Sigaction = undefined;
     try std.posix.sigaction(std.posix.SIG.INT, &act, &oact);
     waitSignalLoop();
+    state.mined_block_ch.close();
 
     // Waiting for other threads to be stopped.
-    http_server_thread.join();
     udp_server_thread.join();
     mining_loop_thread.join();
     broadcast_loop_thread.join();
@@ -403,14 +429,8 @@ pub fn main() !void {
 
 fn waitSignalLoop() void {
     log.info("starting to wait for os signal", .{});
-    while (shouldWait()) {}
+    _ = shouldWait(true, 0);
     log.info("exiting os signal waiting loop", .{});
-}
-
-fn httpServer() void {
-    log.info("starting http server", .{});
-    while (shouldWait()) {}
-    log.info("http server stopped", .{});
 }
 
 fn udpServer(state: *State, port: u16) !void {
@@ -431,7 +451,7 @@ fn udpServer(state: *State, port: u16) !void {
     var buffer: [1024]u8 = undefined;
     var from_addr: std.posix.sockaddr = undefined;
     var from_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-    while (shouldWait()) {
+    while (shouldWait(false, 5)) {
         const n = std.posix.recvfrom(
             socket,
             buffer[0..],
@@ -440,7 +460,7 @@ fn udpServer(state: *State, port: u16) !void {
             &from_addr_len,
         ) catch |e| switch (e) {
             error.WouldBlock => {
-                if (state.rpc_packet_ch.receive()) |rpc_packet| {
+                if (state.rpc_packet_ch.try_receive()) |rpc_packet| {
                     log.debug("send rpc packet {any}", .{rpc_packet});
                     const buf = rpc_packet.inner.encode();
                     const n = std.posix.sendto(
@@ -486,41 +506,45 @@ fn miningLoop(state: *State, rnd: *std.rand.Xoshiro256) !void {
     log.info("starting mining loop", .{});
     var nonce: [nonce_length]u8 = [_]u8{0} ** nonce_length;
     var block: Block = undefined;
-    while (shouldWait()) {
-        while (shouldWait()) {
-            std.time.sleep(std.time.ns_per_ms * 10); // 10ms
-            try mineBlock(state, rnd, &nonce, &block);
-        }
+    while (shouldWait(false, 10)) {
+        try mineBlock(state, rnd, &nonce, &block);
     }
     log.info("mining loop stopped", .{});
 }
 
 fn broadcastLoop(state: *State) void {
     log.info("starting broadcast loop", .{});
-    while (shouldWait()) {
-        if (state.mined_block_ch.receive()) |block| {
-            log.debug("new block is found\n{any}", .{block});
-            for (state.nodes) |node| {
-                // Some of the nodes can be undefined, so it is a check.
-                if (node.in.sa.port == 0) continue;
-                log.debug("block can be send to {any} node", .{node});
-                state.rpc_packet_ch.send(RpcPacketExt{ .addr = node, .inner = RpcPacket{
-                    .event = RpcPacketEvent.NewBlock,
-                    .block = block,
-                } });
-            }
+    while (true) {
+        const recv = state.mined_block_ch.receive();
+        if (recv == null) {
+            log.info("broadcast loop stopped", .{});
+            return;
+        }
+        const block = recv.?;
+        log.debug("new block is found\n{any}", .{block});
+        for (state.nodes) |node| {
+            // Some of the nodes can be undefined, so it is a check.
+            if (node.in.sa.port == 0) continue;
+            log.debug("block can be send to {any} node", .{node});
+            state.rpc_packet_ch.send(RpcPacketExt{ .addr = node, .inner = RpcPacket{
+                .event = RpcPacketEvent.NewBlock,
+                .block = block,
+            } });
         }
     }
-    log.info("broadcast loop stopped", .{});
 }
 
-fn shouldWait() bool {
-    const wait_signal_state = wait_signal.load(std.builtin.AtomicOrder.monotonic);
-    if (wait_signal_state) {
-        // To not overload cpu.
-        std.time.sleep(std.time.ns_per_ms * 5); // 5ms
+fn shouldWait(static: bool, ms: u64) bool {
+    wait_signal_mutex.lock();
+    defer wait_signal_mutex.unlock();
+    if (static) {
+        wait_signal_cond.wait(&wait_signal_mutex);
+    } else {
+        wait_signal_cond.timedWait(&wait_signal_mutex, ms * std.time.ns_per_ms) catch |err| switch (err) {
+            error.Timeout => {},
+        };
     }
-    return wait_signal_state;
+    return wait_signal;
 }
 
 fn fillBufRandom(rnd: *std.rand.Xoshiro256, nonce: *[nonce_length]u8) void {
