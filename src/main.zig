@@ -412,7 +412,10 @@ pub fn main() !void {
     var oact: std.posix.Sigaction = undefined;
     try std.posix.sigaction(std.posix.SIG.INT, &act, &oact);
     waitSignalLoop();
+
+    // Close all channels.
     state.mined_block_ch.close();
+    state.rpc_packet_ch.close();
 
     // Waiting for other threads to be stopped.
     udp_server_thread.join();
