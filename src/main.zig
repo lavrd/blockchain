@@ -425,6 +425,7 @@ pub fn main() !void {
     var blocks = state.blocks.lock();
     log.debug("current blocks length is {d}", .{blocks.inner.items.len});
     std.debug.assert(blocks.inner.items.len - 1 == blocks.inner.getLast().index);
+    try saveGraph(blocks.inner.*);
     blocks.unlock();
 
     log.info("finally successfully exiting...", .{});
@@ -688,6 +689,96 @@ fn logFn(
         "{s} " ++ "[" ++ comptime scoped_level.asText() ++ "] " ++ "(" ++ @tagName(scope) ++ ") " ++ format ++ "\n",
         .{time_str} ++ args,
     ) catch return;
+}
+
+fn saveGraph(full_blocks: std.ArrayList(Block)) !void {
+    var blocks = full_blocks.items;
+    if (full_blocks.items.len > 4) {
+        blocks = full_blocks.items[full_blocks.items.len - 4 ..];
+    }
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
+    _ = try print(&buf, "strict digraph {s}", .{"{"});
+    _ = try print(&buf, "\n  dpi=\"296\";", .{});
+    _ = try print(&buf, "\n  rankdir=\"LR\";", .{});
+    _ = try print(&buf, "\n\n", .{});
+    for (blocks) |block| {
+        const hash = std.fmt.bytesToHex(block.hash, .lower);
+        const prev_hash = std.fmt.bytesToHex(block.prev_hash, .lower);
+        _ = try print(&buf, "\n  \"{d}\" [ label=\"Index: {d}\nHash: {s}..{s}\n Prev hash: {s}..{s}\nComplexity: {d}\nTimestamp: {d}\", shape=\"box\", weight={d} ];\n", .{
+            block.index,
+            block.index,
+            hash[0..8],
+            hash[56..],
+            prev_hash[0..8],
+            prev_hash[56..],
+            block.complexity,
+            block.timestamp,
+            block.index,
+        });
+    }
+    _ = try print(&buf, "\n", .{});
+    for (0..blocks.len) |i| {
+        if (i + 1 == blocks.len) {
+            break;
+        }
+        const block = blocks[i];
+        _ = try print(&buf, "\n  \"{d}\" -> \"{d}\" [ ];", .{
+            block.index,
+            block.index + 1,
+        });
+    }
+    _ = try print(&buf, "\n{s}", .{"}"});
+
+    const file = try std.fs.cwd().createFile(
+        "dot/graph.dot",
+        .{},
+    );
+    defer file.close();
+    _ = try file.writeAll(buf[0..bufUsefulLength(&buf)]);
+}
+
+fn print(buf: []u8, comptime fmt: []const u8, args: anytype) !void {
+    const buf_useful_length = bufUsefulLength(buf);
+    _ = try std.fmt.bufPrint(buf[buf_useful_length..], fmt, args);
+}
+
+fn bufUsefulLength(buf: []u8) usize {
+    for (0..buf.len) |i| {
+        if (buf[i] == 0) return i;
+    }
+    return 0;
+}
+
+test "test_graph_generation" {
+    std.testing.log_level = std.log.Level.debug;
+    const allocator = std.testing.allocator;
+    var blocks = std.ArrayList(Block).init(allocator);
+    defer blocks.deinit();
+    try blocks.append(Block{
+        .index = 0,
+        .hash = [_]u8{1} ** hash_length,
+        .prev_hash = [_]u8{0} ** hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 243,
+        .nonce = [_]u8{0} ** nonce_length,
+    });
+    try blocks.append(Block{
+        .index = 1,
+        .hash = [_]u8{2} ** hash_length,
+        .prev_hash = [_]u8{1} ** hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 51,
+        .nonce = [_]u8{0} ** nonce_length,
+    });
+    try blocks.append(Block{
+        .index = 2,
+        .hash = [_]u8{3} ** hash_length,
+        .prev_hash = [_]u8{2} ** hash_length,
+        .timestamp = std.time.milliTimestamp(),
+        .complexity = 87,
+        .nonce = [_]u8{0} ** nonce_length,
+    });
+    try saveGraph(blocks);
 }
 
 test "test_block_encoding" {

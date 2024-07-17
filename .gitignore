@@ -1,4 +1,4 @@
 .zig-cache
 zig-out
-dot/out.dot
+dot/graph.dot
 dot/graph.png

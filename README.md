@@ -14,6 +14,13 @@ MINING=1 NODES=127.0.0.1:33400 GENESIS=00000000000000000000000000000000c4a55b5a7
   make run
 ```
 
+Or you can use predefined commands:
+
+```shell
+make run_ln
+make run_fn
+```
+
 ### Docker
 
 ```shell
@@ -36,6 +43,18 @@ Or you can use predefined commands:
 make run_docker_ln
 make run_docker_fn
 ```
+
+## Graph
+
+In order to generate blockchain graph use following command:
+
+```shell
+make gen_graph
+```
+
+### Example
+
+![](./docs/images/graph.png)
 
 ## Troubleshooting
 
