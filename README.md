@@ -30,6 +30,13 @@ docker run --rm -it -e MINING=1 -e NODES=127.0.0.1:33400 -e GENESIS=000000000000
   --name full-node --net host blockchain
 ```
 
+Or you can use predefined commands:
+
+```shell
+make run_docker_ln
+make run_docker_fn
+```
+
 ## Troubleshooting
 
 To test UDP server use following command: `echo "test" | nc -u -w 1 127.0.0.1 44600`.
