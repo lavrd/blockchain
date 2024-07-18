@@ -345,9 +345,13 @@ pub fn main() !void {
     if (envs.get("MINING")) |val| {
         if (std.mem.eql(u8, val, "1")) mining_enabled = true;
     }
-    var port: u16 = 46400;
-    if (envs.get("PORT")) |val| {
-        port = try std.fmt.parseInt(u16, val, 10);
+    var udp_port: u16 = 23000;
+    if (envs.get("UDP_PORT")) |val| {
+        udp_port = try std.fmt.parseInt(u16, val, 10);
+    }
+    var http_port: u16 = 33000;
+    if (envs.get("HTTP_PORT")) |val| {
+        http_port = try std.fmt.parseInt(u16, val, 10);
     }
     const nodes = try parseEnvNodes(envs);
     var genesis: Block = undefined;
@@ -394,10 +398,11 @@ pub fn main() !void {
 
     const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{
         @as(std.mem.Allocator, allocator),
+        @as(u16, http_port),
     });
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{
         @as(*State, &state),
-        @as(u16, port),
+        @as(u16, udp_port),
     });
     const mining_loop_thread = try std.Thread.spawn(.{}, miningLoop, .{
         @as(*State, &state),
@@ -443,10 +448,10 @@ fn waitSignalLoop() void {
 
 // In general we do not need allocator here, but we use it just
 // to check how to work with it in case of http request.
-fn httpServer(allocator: std.mem.Allocator) !void {
-    const address = std.net.Address.parseIp("0.0.0.0", 8080) catch unreachable;
+fn httpServer(allocator: std.mem.Allocator, port: u16) !void {
+    const address = std.net.Address.parseIp("0.0.0.0", port) catch unreachable;
     var tcp_server = try address.listen(.{
-        .reuse_address = true,
+        .reuse_address = false,
         .force_nonblocking = true,
     });
     defer tcp_server.deinit();
