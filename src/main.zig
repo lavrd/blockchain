@@ -434,7 +434,9 @@ pub fn main() !void {
     var blocks = state.blocks.lock();
     log.debug("current blocks length is {d}", .{blocks.inner.items.len});
     std.debug.assert(blocks.inner.items.len - 1 == blocks.inner.getLast().index);
-    try saveGraph(blocks.inner.*);
+    saveGraph(blocks.inner.*) catch |err| {
+        log.err("failed to save graph: {any}", .{err});
+    };
     blocks.unlock();
 
     log.info("finally successfully exiting...", .{});
