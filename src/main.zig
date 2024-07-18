@@ -392,6 +392,9 @@ pub fn main() !void {
         blocks.unlock();
     }
 
+    const http_server_thread = try std.Thread.spawn(.{}, httpServer, .{
+        @as(std.mem.Allocator, allocator),
+    });
     const udp_server_thread = try std.Thread.spawn(.{}, udpServer, .{
         @as(*State, &state),
         @as(u16, port),
@@ -418,6 +421,7 @@ pub fn main() !void {
     state.rpc_packet_ch.close();
 
     // Waiting for other threads to be stopped.
+    http_server_thread.join();
     udp_server_thread.join();
     mining_loop_thread.join();
     broadcast_loop_thread.join();
@@ -435,6 +439,53 @@ fn waitSignalLoop() void {
     log.info("starting to wait for os signal", .{});
     _ = shouldWait(0);
     log.info("exiting os signal waiting loop", .{});
+}
+
+// In general we do not need allocator here, but we use it just
+// to check how to work with it in case of http request.
+fn httpServer(allocator: std.mem.Allocator) !void {
+    const address = std.net.Address.parseIp("0.0.0.0", 8080) catch unreachable;
+    var tcp_server = try address.listen(.{
+        .reuse_address = true,
+        .force_nonblocking = true,
+    });
+    defer tcp_server.deinit();
+    log.info("starting http server on {any}", .{address});
+
+    while (shouldWait(5)) {
+        const response = tcp_server.accept() catch |err| {
+            switch (err) {
+                error.WouldBlock => continue,
+                else => return,
+            }
+        };
+        var read_buffer: [1024]u8 = [_]u8{0} ** 1024;
+        var http_server = std.http.Server.init(response, &read_buffer);
+        switch (http_server.state) {
+            .ready => {},
+            else => continue,
+        }
+        var request = try http_server.receiveHead();
+
+        for (request.head.target) |byte| {
+            if (!std.ascii.isASCII(byte)) {
+                log.err("request target is no ascii: {any}", .{request.head.target});
+                continue;
+            }
+        }
+        const target = try std.ascii.allocLowerString(allocator, request.head.target);
+        log.debug("http request {s} {s}", .{
+            @tagName(request.head.method),
+            target,
+        });
+        allocator.free(target);
+
+        try request.respond(&[_]u8{}, .{
+            .status = std.http.Status.ok,
+        });
+    }
+
+    log.info("http server was stopped by os signal", .{});
 }
 
 fn udpServer(state: *State, port: u16) !void {
